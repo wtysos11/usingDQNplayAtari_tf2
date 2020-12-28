@@ -133,6 +133,7 @@ class DQNplayer:
                 action = self.epsilon_greedy(action_val)
                 #执行动作,获取新环境
                 next_observation, reward, done, _ = self.env.step(action)
+                currentEpisodeReward += reward # 更新episode奖励
 
                 #制作元组存入记忆库中
                 self.memoryBuffer.addItem([observation,action,reward,self.preprocessing(next_observation),done])
@@ -154,7 +155,7 @@ class DQNplayer:
                         # Q*(s,a) = r + \gamma * Q'(s',a')
                         QTable[i][replay_action] =reward_array[i] + self.discount_factor * max(next_actionVal[i])
                     #喂给神经网络，使用MSE作为损失函数
-                    model.fit(obs_array,QTable)
+                    Q_main.fit(obs_array,QTable)
                     #训练
                 # 如果又经过了指定的时间
                 if self.global_counting % self.target_update_rate == 0:
@@ -164,6 +165,7 @@ class DQNplayer:
                 # 计数器更新
                 self.global_counting += 1
             #记录episode总奖励
+            episode_total_reward.append(currentEpisodeReward)
         # 训练完毕
 
     def epsilon_greedy(self,actionVal):
