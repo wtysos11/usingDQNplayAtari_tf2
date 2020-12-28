@@ -1,4 +1,6 @@
 import tensorflow.keras as keras
+from tensorflow.keras.layers import Input,Flatten,Dense,Conv2D
+from tensorflow.keras.models import Model
 import gym
 
 import numpy as np
@@ -23,12 +25,19 @@ class NeuralNetworkBuilder:
         '''
         # Game-specific 游戏特化代码，如果后续要做泛化的话需要修改此处
         # 第一层应该是一个图像预处理层。使用Pong-v0时的输入为210*160*3
-
-        # 初始化完毕后是三层Conv2D+BN(可能可以不加？)
-
+        model_input = Input(shape=(210,160,3))
+        # 初始化完毕后是三层Conv2D+BN(可能可以不加？先不加看一下效果)
+        conv1 = Conv2D(32,(8,8),strides=(4,4),activation='relu')(model_input)
+        conv2 = Conv2D(64,(4,4),strides=(2,2),activation='relu')(conv1)
+        conv3 = Conv2D(64,(3,3),strides=(1,1),activation='relu')(conv2)
         # 再之后是两层全连接层，确保最后的输出向量维数为action_space的大小
-
+        flatten = Flatten()(conv3)
+        fc1 = Dense(512)(flatten)
+        model_output = Dense(n_output)(fc1)
         # 声明模型，并返回它
+        model = Model(model_input,model_output)
+        model.compile(loss="mse",optimizer="adam")
+        return model
 
     def build_network(self,n_input,n_output,name="conv2d"):
         '''
@@ -133,6 +142,8 @@ class DQNplayer:
                 action = self.epsilon_greedy(action_val)
                 #执行动作,获取新环境
                 next_observation, reward, done, _ = self.env.step(action)
+                
+                gameDone = done
                 currentEpisodeReward += reward # 更新episode奖励
 
                 #制作元组存入记忆库中
@@ -153,6 +164,9 @@ class DQNplayer:
                     for i in range(len(obs_array)):
                         replay_action = action_array[i]
                         # Q*(s,a) = r + \gamma * Q'(s',a')
+                        # 此处的思路是这样的，最终要求的损失值是(y-Q(s_t,a_t))^2
+                        # 如果将Q(s_t)的动作a_t部分更换成新的y，其他地方不变
+                        # 在MSE的loss计算模式下，其他地方为0，数组编号为a_t时有(y-Q(s_t,a_t))^2
                         QTable[i][replay_action] =reward_array[i] + self.discount_factor * max(next_actionVal[i])
                     #喂给神经网络，使用MSE作为损失函数
                     Q_main.fit(obs_array,QTable)
@@ -167,6 +181,9 @@ class DQNplayer:
             #记录episode总奖励
             episode_total_reward.append(currentEpisodeReward)
         # 训练完毕
+        plt.clr()
+        plt.plot(episode_total_reward)
+        plt.show()
 
     def epsilon_greedy(self,actionVal):
         '''
