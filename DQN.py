@@ -3,6 +3,9 @@ from tensorflow.keras.layers import Input,Flatten,Dense,Conv2D
 from tensorflow.keras.models import Model
 import gym
 
+import cv2
+from skimage.color import rgb2gray
+
 import numpy as np
 import matplotlib.pyplot as plt
 from collections import deque
@@ -26,7 +29,7 @@ class NeuralNetworkBuilder:
         '''
         # Game-specific 游戏特化代码，如果后续要做泛化的话需要修改此处
         # 第一层应该是一个图像预处理层。使用Pong-v0时的输入为210*160*3
-        model_input = Input(shape=(210,160,3))
+        model_input = Input(shape=n_input)
         # 初始化完毕后是三层Conv2D+BN(可能可以不加？先不加看一下效果)
         conv1 = Conv2D(32,(8,8),strides=(4,4),activation='relu')(model_input)
         conv2 = Conv2D(64,(4,4),strides=(2,2),activation='relu')(conv1)
@@ -101,8 +104,9 @@ class DQNplayer:
         self.networkName = networkName
         # 构建网络
         Builder = NeuralNetworkBuilder()
-        self.Q_main = Builder.build_network(self.env.observation_space.shape,self.env.action_space.n,name = networkName)
-        self.Q_target = Builder.build_network(self.env.observation_space.shape,self.env.action_space.n,name = networkName)
+        network_input = (84,84,4) # 根据skip frame得到的形状
+        self.Q_main = Builder.build_network(network_input,self.env.action_space.n,name = networkName)
+        self.Q_target = Builder.build_network(network_input,self.env.action_space.n,name = networkName)
         # 基础设施
         self.memoryBuffer = MemoryBuffer(max_length = max_memory_length)
         # 声明超参数
@@ -125,6 +129,8 @@ class DQNplayer:
         '''
         self.global_counting = 0 #额外超参数，每次训练重置，负责提供各个超参数的衰变
         step_train = 4 # 每4次行动训练一次神经网络
+        frameNum_perState = 4 # 4个环境样本组合在一起作为一个状态
+         # 用来维护，保存最新的若干个处理后的帧
 
         episode_total_reward = [] # 用于存放每一轮的奖励，并绘制最终曲线
         
@@ -135,13 +141,19 @@ class DQNplayer:
             currentEpisodeReward = 0
             #初始化环境，主要是运行obs = env.reset()
             observation = self.env.reset()
+            # 每次游戏时应该清空之前存储的状态信息
+            preprocessFrameStack = deque(maxlen = frameNum_perState)
             #当游戏没有结束
             while not gameDone:
                 print("episode :{}/ frame : {}".format(episode_num_counter,self.global_counting))
                 #拿取当前环境并初始化图像（上一时刻的下一记录即为当前记录）
                 observation = self.preprocessing(observation)
+                # 直接填满，目的是为了对齐状态
+                while len(preprocessFrameStack) < frameNum_perState:
+                    preprocessFrameStack.append(observation) #仅在此处添加状态，将新的处理后的状态加入
+                
                 #epsilon-greedy，拿取动作
-                action_val = self.Q_main.predict(np.array([observation])) # 这里需要思考一下，我觉得应该是要上升为数组再开回来
+                action_val = self.Q_main.predict(np.array([np.stack(preprocessFrameStack,axis=2)])) # 这里需要思考一下，我觉得应该是要上升为数组再开回来
                 action = self.epsilon_greedy(action_val)
                 #执行动作,获取新环境
                 next_observation, reward, done, _ = self.env.step(action)
@@ -150,7 +162,14 @@ class DQNplayer:
                 currentEpisodeReward += reward # 更新episode奖励
 
                 #制作元组存入记忆库中
-                self.memoryBuffer.addItem([observation,action,reward,self.preprocessing(next_observation),done])
+                # 当且仅当预处理帧的数量足够的时候可以进行如此操作
+                if len(preprocessFrameStack)>=frameNum_perState:
+                    # 制作新的临时队列来保存新的预处理帧
+                    temp_stack = preprocessFrameStack.copy()
+                    temp_stack.append(self.preprocessing(next_observation))
+                    # 使用np.stack制作大小为84*84*4的新状态
+                    self.memoryBuffer.addItem([np.stack(preprocessFrameStack,axis=2),action,reward,np.stack(temp_stack,axis=2),done])
+                    del temp_stack
 
                 #如果运行了指定次数且有足够多的训练数据，则开始训练
                 if self.global_counting % step_train == 0 and self.memoryBuffer.getLength() >= batch_size:
@@ -219,7 +238,9 @@ class DQNplayer:
         如果是RAM数据，则直接返回
         '''
         if self.networkName == "conv2d":
-            return np.divide(observation,255.)
+            resized_frame = cv2.resize(observation, (84, 84), interpolation = cv2.INTER_AREA)
+            frame_gray = rgb2gray(resized_frame)
+            return frame_gray
         else:
             return observation
 
