@@ -6,6 +6,7 @@ import gym
 import numpy as np
 import matplotlib.pyplot as plt
 from collections import deque
+import logging
 
 class NeuralNetworkBuilder:
     '''
@@ -129,12 +130,14 @@ class DQNplayer:
         
         for episode_num_counter in range(episode_num):
         #对于每一个episode
+            logging.info("episode num {} start".format(episode_num_counter))
             gameDone = False
             currentEpisodeReward = 0
             #初始化环境，主要是运行obs = env.reset()
             observation = self.env.reset()
             #当游戏没有结束
             while not gameDone:
+                print("episode :{}/ frame : {}".format(episode_num_counter,self.global_counting))
                 #拿取当前环境并初始化图像（上一时刻的下一记录即为当前记录）
                 observation = self.preprocessing(observation)
                 #epsilon-greedy，拿取动作
@@ -169,7 +172,7 @@ class DQNplayer:
                         # 在MSE的loss计算模式下，其他地方为0，数组编号为a_t时有(y-Q(s_t,a_t))^2
                         QTable[i][replay_action] =reward_array[i] + self.discount_factor * max(next_actionVal[i])
                     #喂给神经网络，使用MSE作为损失函数
-                    self.Q_main.fit(np.array(obs_array),QTable,verbose=0)
+                    history = self.Q_main.fit(np.array(obs_array),QTable,verbose=0)
                     #训练
                 # 如果又经过了指定的时间
                 if self.global_counting % self.target_update_rate == 0:
@@ -180,6 +183,7 @@ class DQNplayer:
                 self.global_counting += 1
             #记录episode总奖励
             episode_total_reward.append(currentEpisodeReward)
+            logging.info("episode {} 's reward {}, loss {}".format(episode_num_counter,currentEpisodeReward,history.history["loss"]))
         # 训练完毕
         plt.clr()
         plt.plot(episode_total_reward)
