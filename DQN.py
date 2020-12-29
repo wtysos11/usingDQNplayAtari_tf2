@@ -205,7 +205,7 @@ class DQNplayer:
             episode_total_reward.append(currentEpisodeReward)
             logging.info("episode {} 's reward {}, loss {}".format(episode_num_counter,currentEpisodeReward,history.history["loss"]))
         # 训练完毕
-        plt.clr()
+        plt.cla()
         plt.plot(episode_total_reward)
         plt.show()
 
