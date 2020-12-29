@@ -180,6 +180,7 @@ class DQNplayer:
                     self.Q_target.set_weights(self.Q_main.get_weights())
                 
                 # 计数器更新
+                observation = next_observation
                 self.global_counting += 1
             #记录episode总奖励
             episode_total_reward.append(currentEpisodeReward)
