@@ -50,7 +50,7 @@ class NeuralNetworkBuilder:
             model 返回一个Keras类型的model
         '''
         if name=="conv2d":
-            return build_conv2d(n_input,n_output)
+            return self.build_conv2d(n_input,n_output)
 
 
 class MemoryBuffer:
@@ -100,10 +100,10 @@ class DQNplayer:
         self.networkName = networkName
         # 构建网络
         Builder = NeuralNetworkBuilder()
-        self.Q_main = Builder.build_network(env.observation_space.shape,env.action_space.n,name = networkName)
-        self.Q_target = Builder.build_network(env.observation_space.shape,env.action_space.n,name = networkName)
+        self.Q_main = Builder.build_network(self.env.observation_space.shape,self.env.action_space.n,name = networkName)
+        self.Q_target = Builder.build_network(self.env.observation_space.shape,self.env.action_space.n,name = networkName)
         # 基础设施
-        self.memoryBuffer = MemoryBuffer(max_lnegth = max_memory_length)
+        self.memoryBuffer = MemoryBuffer(max_length = max_memory_length)
         # 声明超参数
         # epsilon控制系统
         # epsilon min max decay rate...
@@ -138,7 +138,7 @@ class DQNplayer:
                 #拿取当前环境并初始化图像（上一时刻的下一记录即为当前记录）
                 observation = self.preprocessing(observation)
                 #epsilon-greedy，拿取动作
-                action_val = self.Q_main.predict([observation])[0] # 这里需要思考一下，我觉得应该是要上升为数组再开回来
+                action_val = self.Q_main.predict(np.array([observation])) # 这里需要思考一下，我觉得应该是要上升为数组再开回来
                 action = self.epsilon_greedy(action_val)
                 #执行动作,获取新环境
                 next_observation, reward, done, _ = self.env.step(action)
@@ -157,9 +157,9 @@ class DQNplayer:
                     obs_array = [x for x in obs_array]
                     next_obs_array = [x for x in next_obs_array]
                     # 此处一定要使用Q_target进行计算
-                    next_actionVal = self.Q_target.predict(next_obs_array) #得到Q(s')的所有动作的向量
+                    next_actionVal = self.Q_target.predict(np.array(next_obs_array)) #得到Q(s')的所有动作的向量
                     # 计算Q表
-                    QTable = self.Q_main.predict(obs_array)
+                    QTable = self.Q_main.predict(np.array(obs_array))
                     # 对于每一个状态，对Q表进行更新
                     for i in range(len(obs_array)):
                         replay_action = action_array[i]
@@ -169,7 +169,7 @@ class DQNplayer:
                         # 在MSE的loss计算模式下，其他地方为0，数组编号为a_t时有(y-Q(s_t,a_t))^2
                         QTable[i][replay_action] =reward_array[i] + self.discount_factor * max(next_actionVal[i])
                     #喂给神经网络，使用MSE作为损失函数
-                    Q_main.fit(obs_array,QTable)
+                    self.Q_main.fit(np.array(obs_array),QTable,verbose=0)
                     #训练
                 # 如果又经过了指定的时间
                 if self.global_counting % self.target_update_rate == 0:
@@ -217,4 +217,7 @@ class DQNplayer:
             return np.divide(observation,255.)
         else:
             return observation
+
+    def savemodel(self,name="Q_main"):
+        self.Q_main.save(name)
 

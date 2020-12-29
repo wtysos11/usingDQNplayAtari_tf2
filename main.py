@@ -7,6 +7,7 @@ def main():
     player = DQN.DQNplayer(name="Pong-v0",networkName="conv2d") #声明player，使用Conv2D解析RGB
     player.main_process() # 进行训练，训练过程中要绘制episode总奖励曲线
     # 选择保存模型
+    player.savemodel("Q_main")
     # 能够跑出一个模型
 
 if __name__ == "__main__":
