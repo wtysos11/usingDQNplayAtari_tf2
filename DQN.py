@@ -262,6 +262,7 @@ class DQNplayer:
                     # 进行预处理
                     obs_array = [x for x in obs_array]
                     next_obs_array = [x for x in next_obs_array]
+                    current_actionVal = self.Q_main.predict(np.array(next_obs_array))
                     # 此处一定要使用Q_target进行计算
                     next_actionVal = self.Q_target.predict(np.array(next_obs_array)) #得到Q(s')的所有动作的向量
                     # 计算Q表
@@ -274,11 +275,13 @@ class DQNplayer:
                         # 此处的思路是这样的，最终要求的损失值是(y-Q(s_t,a_t))^2
                         # 如果将Q(s_t)的动作a_t部分更换成新的y，其他地方不变
                         # 在MSE的loss计算模式下，其他地方为0，数组编号为a_t时有(y-Q(s_t,a_t))^2
-
+                        # Double Q优化处
+                        maxFutureAction = np.argmax(current_actionVal[i],axis=-1)#使用最新的网络来选择动作
+                        maxActionVal = next_actionVal[i][maxFutureAction]
                         # TD_error = q_target - q_eval
-                        td_errors[i] = QTable[i][replay_action] - reward_array[i] + self.discount_factor * max(next_actionVal[i])
+                        td_errors[i] = QTable[i][replay_action] - (reward_array[i] + self.discount_factor * maxActionVal)
                         # 更新，这样keras中就可以直接计算
-                        QTable[i][replay_action] = reward_array[i] + self.discount_factor * max(next_actionVal[i])
+                        QTable[i][replay_action] = reward_array[i] + self.discount_factor * maxActionVal
                         
                     #喂给神经网络，使用MSE作为损失函数。进行训练
                     history = self.Q_main.fit(np.array(obs_array),QTable,verbose=0)
