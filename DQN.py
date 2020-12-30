@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 from collections import deque
 import logging
 
+from replay_buffer import PrioritizedReplayBuffer,LinearSchedule
+
 class NeuralNetworkBuilder:
     '''
         负责构建Q神经网络
@@ -71,7 +73,7 @@ class MemoryBuffer:
     def addItem(self,item):
         self.memory.append(item)
 
-    def sampleBatch(self,batch_size = 100):
+    def sampleBatch(self,batch_size = 32):
         '''
         输入一个batch所需要的数据量，输出这个batch的数据。
         数据由记忆库乱序输出得到
@@ -92,7 +94,7 @@ class DQNplayer:
         Q_main，神经网络，主要训练函数。输入为Atari状态，输出为大小等于动作空间的向量
         Q_target，Q_main的旧有拷贝，负责切断因果性进行最大动作估计。
     '''
-    def __init__(self,name="Pong-v0",networkName="conv2d",max_memory_length = 10000):
+    def __init__(self,name="Pong-v0",networkName="conv2d",max_memory_length = 100000):
         '''
         初始化，这里应该声明网络和超参数
         Args:
@@ -108,7 +110,18 @@ class DQNplayer:
         self.Q_main = Builder.build_network(network_input,self.env.action_space.n,name = networkName)
         self.Q_target = Builder.build_network(network_input,self.env.action_space.n,name = networkName)
         # 基础设施
-        self.memoryBuffer = MemoryBuffer(max_length = max_memory_length)
+        # 弃用简易buffer，改用priority_buffer(from baseline.dqn)
+        # self.memoryBuffer = MemoryBuffer(max_length = max_memory_length)
+        # 使用Priority_buffer，需要修改三个地方
+        # 第一，开头声明。这里需要加上各种超参数
+        # 第二，与普通的buffer相比，拿变量的时候不是五个值而是七个值，最后会有一个weights和一个batch_idxes
+        # 第三，计算完成之后要将td_errors用来更新权重。关键在于td_error怎么计算，按论文上的说法，TD-error = q-target - q-eval
+        # new_priorities = abs(td_error) + epsilon(1e-6)，然后调用replay_buffer.update_priorities方法
+        self.buffer_size = max_memory_length
+        self.prioritized_replay_alpha = 0.6 # 用于构建priority_replay部分
+        self.prioritized_replay_beta0 = 0.4 # 用于在sample中充当参数
+        self.prioritized_replay_eps = 1e-6 #用于更新priority
+        self.memoryBuffer = PrioritizedReplayBuffer(self.buffer_size,self.prioritized_replay_alpha)
         # 声明超参数
         # epsilon控制系统
         # epsilon min max decay rate...
@@ -123,17 +136,82 @@ class DQNplayer:
         # Q_target更新速率
         self.target_update_rate = 10000
 
-    def main_process(self,episode_num = 10000,batch_size = 100):
+    def explore(self,training_step = 50000):
+        '''
+        探索过程，目的是填充memory_buffer
+        进行随机的动作
+        Args:
+            training_step 决定探索次数
+        Returns:
+            没有返回值，仅修改self.memoryBuffer
+        '''
+        training_counting = 0 #额外超参数，每次训练重置，负责提供各个超参数的衰变
+        episode_num_counter = 0
+        step_train = 4 # 每4次行动训练一次神经网络
+        frameNum_perState = 4 # 4个环境样本组合在一起作为一个状态
+        
+        # exploration
+        logging.info("Start Training")
+        while training_counting < training_step:
+        #对于每一个episode
+            logging.info("training episode num {}/{} start".format(episode_num_counter,training_counting))
+            gameDone = False
+            #初始化环境，主要是运行obs = env.reset()
+            observation = self.env.reset()
+            # 每次游戏时应该清空之前存储的状态信息
+            preprocessFrameStack = deque(maxlen = frameNum_perState)
+            #当游戏没有结束
+            while not gameDone:
+                if training_counting % 1000 == 0:
+                    print("exploration episode :{}/ frame : {}".format(episode_num_counter,training_counting))
+                #拿取当前环境并初始化图像（上一时刻的下一记录即为当前记录）
+                observation = self.preprocessing(observation)
+                # 直接填满，目的是为了对齐状态
+                while len(preprocessFrameStack) < frameNum_perState:
+                    preprocessFrameStack.append(observation) #仅在此处添加状态，将新的处理后的状态加入
+                
+                #epsilon-greedy，拿取动作
+                action = self.env.action_space.sample()
+                #执行动作,获取新环境
+                next_observation, reward, done, _ = self.env.step(action)
+                
+                gameDone = done
+                #制作元组存入记忆库中
+                # 当且仅当预处理帧的数量足够的时候可以进行如此操作
+                if len(preprocessFrameStack)>=frameNum_perState:
+                    # 制作新的临时队列来保存新的预处理帧
+                    temp_stack = preprocessFrameStack.copy()
+                    temp_stack.append(self.preprocessing(next_observation))
+                    # 使用np.stack制作大小为84*84*4的新状态
+                    self.memoryBuffer.add(np.stack(preprocessFrameStack,axis=2),action,reward,np.stack(temp_stack,axis=2),done)
+                    del temp_stack
+
+                training_counting += 1
+
+                # 计数器更新
+                observation = next_observation
+            episode_num_counter += 1
+            #记录episode总奖励
+        logging.info("End Training")
+
+    def main_process(self,episode_num = 10000,batch_size = 32):
         '''
         主过程，详情见上面的部分
         '''
         self.global_counting = 0 #额外超参数，每次训练重置，负责提供各个超参数的衰变
         step_train = 4 # 每4次行动训练一次神经网络
         frameNum_perState = 4 # 4个环境样本组合在一起作为一个状态
-         # 用来维护，保存最新的若干个处理后的帧
+        
+        # 声明规划器
+        self.prioritized_replay_beta_iters = episode_num * 1000
+        self.beta_schedule = LinearSchedule(self.prioritized_replay_beta_iters,
+                                       initial_p=self.prioritized_replay_beta0,
+                                       final_p=1.0)
 
         episode_total_reward = [] # 用于存放每一轮的奖励，并绘制最终曲线
-        
+        # exploration
+        self.explore()
+
         for episode_num_counter in range(episode_num):
         #对于每一个episode
             logging.info("episode num {} start".format(episode_num_counter))
@@ -141,11 +219,13 @@ class DQNplayer:
             currentEpisodeReward = 0
             #初始化环境，主要是运行obs = env.reset()
             observation = self.env.reset()
+            # 用来维护，保存最新的若干个处理后的帧
             # 每次游戏时应该清空之前存储的状态信息
             preprocessFrameStack = deque(maxlen = frameNum_perState)
             #当游戏没有结束
             while not gameDone:
-                print("episode :{}/ frame : {}".format(episode_num_counter,self.global_counting))
+                if self.global_counting % 1000 == 0:
+                    print("episode :{}/ frame : {}".format(episode_num_counter,self.global_counting))
                 #拿取当前环境并初始化图像（上一时刻的下一记录即为当前记录）
                 observation = self.preprocessing(observation)
                 # 直接填满，目的是为了对齐状态
@@ -168,13 +248,16 @@ class DQNplayer:
                     temp_stack = preprocessFrameStack.copy()
                     temp_stack.append(self.preprocessing(next_observation))
                     # 使用np.stack制作大小为84*84*4的新状态
-                    self.memoryBuffer.addItem([np.stack(preprocessFrameStack,axis=2),action,reward,np.stack(temp_stack,axis=2),done])
+                    self.memoryBuffer.add(np.stack(preprocessFrameStack,axis=2),action,reward,np.stack(temp_stack,axis=2),done)
                     del temp_stack
 
                 #如果运行了指定次数且有足够多的训练数据，则开始训练
-                if self.global_counting % step_train == 0 and self.memoryBuffer.getLength() >= batch_size:
+                if self.global_counting % step_train == 0 and len(self.memoryBuffer) >= batch_size:
                     #从记忆库拿取数据，转换成数组形式
-                    obs_array,action_array,reward_array,next_obs_array,done_array = self.memoryBuffer.sampleBatch(batch_size=batch_size)
+                    # 未完成！ 
+                    experience = self.memoryBuffer.sample(batch_size,beta = self.beta_schedule.value(self.global_counting))
+                    (obs_array,action_array,reward_array,next_obs_array,done_array,weights,batch_idxes) = experience
+                    # weights是在duel网络中用来作为选择最佳动作的输入，这里应该是不用的
                     # 进行预处理
                     obs_array = [x for x in obs_array]
                     next_obs_array = [x for x in next_obs_array]
@@ -182,17 +265,26 @@ class DQNplayer:
                     next_actionVal = self.Q_target.predict(np.array(next_obs_array)) #得到Q(s')的所有动作的向量
                     # 计算Q表
                     QTable = self.Q_main.predict(np.array(obs_array))
-                    # 对于每一个状态，对Q表进行更新
+                    # 对于每一个状态，对Q表进行更新。顺便计算td_errors
+                    td_errors = np.zeros(batch_size)
                     for i in range(len(obs_array)):
                         replay_action = action_array[i]
                         # Q*(s,a) = r + \gamma * Q'(s',a')
                         # 此处的思路是这样的，最终要求的损失值是(y-Q(s_t,a_t))^2
                         # 如果将Q(s_t)的动作a_t部分更换成新的y，其他地方不变
                         # 在MSE的loss计算模式下，其他地方为0，数组编号为a_t时有(y-Q(s_t,a_t))^2
-                        QTable[i][replay_action] =reward_array[i] + self.discount_factor * max(next_actionVal[i])
-                    #喂给神经网络，使用MSE作为损失函数
+
+                        # TD_error = q_target - q_eval
+                        td_errors[i] = QTable[i][replay_action] - reward_array[i] + self.discount_factor * max(next_actionVal[i])
+                        # 更新，这样keras中就可以直接计算
+                        QTable[i][replay_action] = reward_array[i] + self.discount_factor * max(next_actionVal[i])
+                        
+                    #喂给神经网络，使用MSE作为损失函数。进行训练
                     history = self.Q_main.fit(np.array(obs_array),QTable,verbose=0)
-                    #训练
+                    # priority_buffer 更新权重
+                    new_priorities = np.abs(td_errors) + self.prioritized_replay_eps
+                    self.memoryBuffer.update_priorities(batch_idxes, new_priorities)
+                    
                 # 如果又经过了指定的时间
                 if self.global_counting % self.target_update_rate == 0:
                     #Q_target更新
@@ -204,6 +296,8 @@ class DQNplayer:
             #记录episode总奖励
             episode_total_reward.append(currentEpisodeReward)
             logging.info("episode {} 's reward {}, loss {}".format(episode_num_counter,currentEpisodeReward,history.history["loss"]))
+            if episode_num_counter % 1000 == 0 and episode_num_counter > 0:
+                self.savemodel(str(episode_num_counter))
         # 训练完毕
         plt.cla()
         plt.plot(episode_total_reward)
