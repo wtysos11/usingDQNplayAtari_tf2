@@ -94,7 +94,7 @@ class DQNplayer:
         Q_main，神经网络，主要训练函数。输入为Atari状态，输出为大小等于动作空间的向量
         Q_target，Q_main的旧有拷贝，负责切断因果性进行最大动作估计。
     '''
-    def __init__(self,name="Pong-v0",networkName="conv2d",max_memory_length = 100000):
+    def __init__(self,name="Pong-v0",networkName="conv2d",max_memory_length = 10000):
         '''
         初始化，这里应该声明网络和超参数
         Args:
@@ -210,7 +210,7 @@ class DQNplayer:
 
         episode_total_reward = [] # 用于存放每一轮的奖励，并绘制最终曲线
         # exploration
-        self.explore()
+        self.explore(self.buffer_size) # 目的是填满缓冲区
 
         for episode_num_counter in range(episode_num):
         #对于每一个episode
