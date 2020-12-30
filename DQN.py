@@ -176,6 +176,8 @@ class DQNplayer:
         #对于每一个episode
             logging.warning("training episode num {}/{} start".format(episode_num_counter,training_counting))
             gameDone = False
+
+            rewardRecorder = deque(maxlen=100)
             #初始化环境，主要是运行obs = env.reset()
             observation = self.env.reset()
             # 每次游戏时应该清空之前存储的状态信息
@@ -194,6 +196,9 @@ class DQNplayer:
                 action = self.env.action_space.sample()
                 #执行动作,获取新环境
                 next_observation, reward, done, _ = self.env.step(action)
+                # 考虑在此处执行Multi-step
+                # 奖励值使用多步的奖励来代替这一步的奖励，因此有
+                # reward = 
                 
                 gameDone = done
                 #制作元组存入记忆库中
@@ -358,6 +363,7 @@ class DQNplayer:
         如果是RAM数据，则直接返回
         '''
         if self.networkName == "conv2d":
+            observation = observation[34:-16, :, :] # 裁剪掉上下的无用部分
             resized_frame = cv2.resize(observation, (84, 84), interpolation = cv2.INTER_AREA)
             frame_gray = rgb2gray(resized_frame)
             return frame_gray
