@@ -1,6 +1,8 @@
 import tensorflow.keras as keras
-from tensorflow.keras.layers import Input,Flatten,Dense,Conv2D
+import tensorflow.keras.backend as K
+from tensorflow.keras.layers import Input,Flatten,Dense,Conv2D,LeakyReLU,Multiply,Lambda
 from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
 import gym
 
 import cv2
@@ -17,10 +19,12 @@ class NeuralNetworkBuilder:
     '''
         负责构建Q神经网络
     '''
-    def __init__(self):
+    def __init__(self,learning_rate = 0.0001):
         '''
             初始化
         '''
+        self.learning_rate = learning_rate
+    
     def build_conv2d(self,n_input,n_output):
         '''
         Args:
@@ -28,21 +32,37 @@ class NeuralNetworkBuilder:
             n_output 输出数据的维数，这里应该是动作空间的大小
         Returns:
             model 返回一个Keras类型的model
+        Reference:
+            参考了https://github.com/keras-rl/keras-rl 的网络架构
         '''
         # Game-specific 游戏特化代码，如果后续要做泛化的话需要修改此处
+        def lambda_out_shape(input_shape): # lambda层使用的计算后续shape的函数
+            shape = list(input_shape)
+            shape[-1] = 1
+            return tuple(shape)
         # 第一层应该是一个图像预处理层。使用Pong-v0时的输入为210*160*3
         model_input = Input(shape=n_input)
+        action_one_hot = Input(shape=(n_output,))# 这里默认n_output为动作空间大小
         # 初始化完毕后是三层Conv2D+BN(可能可以不加？先不加看一下效果)
         conv1 = Conv2D(32,(8,8),strides=(4,4),activation='relu')(model_input)
         conv2 = Conv2D(64,(4,4),strides=(2,2),activation='relu')(conv1)
         conv3 = Conv2D(64,(3,3),strides=(1,1),activation='relu')(conv2)
         # 再之后是两层全连接层，确保最后的输出向量维数为action_space的大小
         flatten = Flatten()(conv3)
+        # Dueling DQN
         fc1 = Dense(512)(flatten)
-        model_output = Dense(n_output)(fc1)
+        leakyrelu = LeakyReLU()(fc1)
+        advantage = Dense(n_output)(leakyrelu)
+        # V(s)
+        fc2 = Dense(512)(flatten)
+        value = Dense(1)(fc2)
+        # 最终的值Q=V+A
+        # 或者说，Q = A-mean(A) + V
+        policy = Lambda(lambda x: x[0] - K.mean(x[0]) + x[1])([advantage, value])
+
         # 声明模型，并返回它
-        model = Model(model_input,model_output)
-        model.compile(loss="mse",optimizer="adam")
+        model = Model(inputs=[model_input], outputs=[policy])
+        model.compile(loss="mse",optimizer=Adam(self.learning_rate))
         return model
 
     def build_network(self,n_input,n_output,name="conv2d"):
@@ -105,7 +125,8 @@ class DQNplayer:
         self.gameName = name
         self.networkName = networkName
         # 构建网络
-        Builder = NeuralNetworkBuilder()
+        self.learning_rate = 0.0001
+        Builder = NeuralNetworkBuilder(self.learning_rate)
         network_input = (84,84,4) # 根据skip frame得到的形状
         self.Q_main = Builder.build_network(network_input,self.env.action_space.n,name = networkName)
         self.Q_target = Builder.build_network(network_input,self.env.action_space.n,name = networkName)
@@ -131,7 +152,6 @@ class DQNplayer:
         self.epsilon_decay_steps = 500000
 
         # 学习率
-        self.learning_rate = 0.001
         self.discount_factor = 0.97
         # Q_target更新速率
         self.target_update_rate = 10000
