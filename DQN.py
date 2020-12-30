@@ -94,7 +94,7 @@ class DQNplayer:
         Q_main，神经网络，主要训练函数。输入为Atari状态，输出为大小等于动作空间的向量
         Q_target，Q_main的旧有拷贝，负责切断因果性进行最大动作估计。
     '''
-    def __init__(self,name="Pong-v0",networkName="conv2d",max_memory_length = 10000):
+    def __init__(self,name="Pong-v0",networkName="conv2d",max_memory_length = 5000):
         '''
         初始化，这里应该声明网络和超参数
         Args:
@@ -151,10 +151,10 @@ class DQNplayer:
         frameNum_perState = 4 # 4个环境样本组合在一起作为一个状态
         
         # exploration
-        logging.info("Start Training")
+        logging.warning("Start Training")
         while training_counting < training_step:
         #对于每一个episode
-            logging.info("training episode num {}/{} start".format(episode_num_counter,training_counting))
+            logging.warning("training episode num {}/{} start".format(episode_num_counter,training_counting))
             gameDone = False
             #初始化环境，主要是运行obs = env.reset()
             observation = self.env.reset()
@@ -192,7 +192,7 @@ class DQNplayer:
                 observation = next_observation
             episode_num_counter += 1
             #记录episode总奖励
-        logging.info("End Training")
+        logging.warning("End Training")
 
     def main_process(self,episode_num = 10000,batch_size = 32):
         '''
@@ -203,7 +203,7 @@ class DQNplayer:
         frameNum_perState = 4 # 4个环境样本组合在一起作为一个状态
         
         # 声明规划器
-        self.prioritized_replay_beta_iters = episode_num * 1000
+        self.prioritized_replay_beta_iters = episode_num * 1500
         self.beta_schedule = LinearSchedule(self.prioritized_replay_beta_iters,
                                        initial_p=self.prioritized_replay_beta0,
                                        final_p=1.0)
@@ -214,7 +214,7 @@ class DQNplayer:
 
         for episode_num_counter in range(episode_num):
         #对于每一个episode
-            logging.info("episode num {} start".format(episode_num_counter))
+            logging.warning("episode num {} start".format(episode_num_counter))
             gameDone = False
             currentEpisodeReward = 0
             #初始化环境，主要是运行obs = env.reset()
@@ -222,6 +222,8 @@ class DQNplayer:
             # 用来维护，保存最新的若干个处理后的帧
             # 每次游戏时应该清空之前存储的状态信息
             preprocessFrameStack = deque(maxlen = frameNum_perState)
+            rewardList = []
+            lossList = []
             #当游戏没有结束
             while not gameDone:
                 if self.global_counting % 1000 == 0:
@@ -237,13 +239,13 @@ class DQNplayer:
                 action = self.epsilon_greedy(action_val)
                 #执行动作,获取新环境
                 next_observation, reward, done, _ = self.env.step(action)
-                
                 gameDone = done
                 currentEpisodeReward += reward # 更新episode奖励
+                rewardList.append(reward)
 
                 #制作元组存入记忆库中
                 # 当且仅当预处理帧的数量足够的时候可以进行如此操作
-                if len(preprocessFrameStack)>=frameNum_perState:
+                if len(preprocessFrameStack) >= frameNum_perState:
                     # 制作新的临时队列来保存新的预处理帧
                     temp_stack = preprocessFrameStack.copy()
                     temp_stack.append(self.preprocessing(next_observation))
@@ -254,7 +256,6 @@ class DQNplayer:
                 #如果运行了指定次数且有足够多的训练数据，则开始训练
                 if self.global_counting % step_train == 0 and len(self.memoryBuffer) >= batch_size:
                     #从记忆库拿取数据，转换成数组形式
-                    # 未完成！ 
                     experience = self.memoryBuffer.sample(batch_size,beta = self.beta_schedule.value(self.global_counting))
                     (obs_array,action_array,reward_array,next_obs_array,done_array,weights,batch_idxes) = experience
                     # weights是在duel网络中用来作为选择最佳动作的输入，这里应该是不用的
@@ -281,6 +282,7 @@ class DQNplayer:
                         
                     #喂给神经网络，使用MSE作为损失函数。进行训练
                     history = self.Q_main.fit(np.array(obs_array),QTable,verbose=0)
+                    lossList.append(history.history["loss"])
                     # priority_buffer 更新权重
                     new_priorities = np.abs(td_errors) + self.prioritized_replay_eps
                     self.memoryBuffer.update_priorities(batch_idxes, new_priorities)
@@ -295,7 +297,8 @@ class DQNplayer:
                 self.global_counting += 1
             #记录episode总奖励
             episode_total_reward.append(currentEpisodeReward)
-            logging.info("episode {} 's reward {}, loss {}".format(episode_num_counter,currentEpisodeReward,history.history["loss"]))
+            logging.warning("episode {} 's reward {}, loss {}".format(episode_num_counter,currentEpisodeReward,np.mean(lossList)))
+            logging.warning("reward distribute: max reward {}/ minreward {}".format(max(rewardList),min(rewardList)))
             if episode_num_counter % 1000 == 0 and episode_num_counter > 0:
                 self.savemodel(str(episode_num_counter))
         # 训练完毕
