@@ -12,6 +12,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from collections import deque
 import logging
+import math
 
 from replay_buffer import PrioritizedReplayBuffer,LinearSchedule
 
@@ -125,7 +126,7 @@ class DQNplayer:
         self.gameName = name
         self.networkName = networkName
         # 构建网络
-        self.learning_rate = 0.0001
+        self.learning_rate = 0.001
         Builder = NeuralNetworkBuilder(self.learning_rate)
         network_input = (84,84,4) # 根据skip frame得到的形状
         self.Q_main = Builder.build_network(network_input,self.env.action_space.n,name = networkName)
@@ -146,12 +147,12 @@ class DQNplayer:
         # 声明超参数
         # epsilon控制系统
         # epsilon min max decay rate...
-        self.epsilon_init = 0.05
         self.epsilon_min = 0.05
         self.epsilon_max = 1.0
-        self.epsilon_decay_steps = 500000
+        self.epsilon_decay_steps = 100000
 
         # 学习率
+        self.trajectory_length = 10 # multi-step的轨迹长度
         self.discount_factor = 0.97
         # Q_target更新速率
         self.target_update_rate = 10000
@@ -176,10 +177,10 @@ class DQNplayer:
         #对于每一个episode
             logging.warning("training episode num {}/{} start".format(episode_num_counter,training_counting))
             gameDone = False
-
-            rewardRecorder = deque(maxlen=100)
+            
             #初始化环境，主要是运行obs = env.reset()
             observation = self.env.reset()
+            rewardRecorder = np.zeros(self.trajectory_length,dtype="float64")
             # 每次游戏时应该清空之前存储的状态信息
             preprocessFrameStack = deque(maxlen = frameNum_perState)
             #当游戏没有结束
@@ -196,9 +197,11 @@ class DQNplayer:
                 action = self.env.action_space.sample()
                 #执行动作,获取新环境
                 next_observation, reward, done, _ = self.env.step(action)
-                # 考虑在此处执行Multi-step
-                # 奖励值使用多步的奖励来代替这一步的奖励，因此有
-                # reward = 
+                rewardRecorder *= self.discount_factor
+                rewardRecorder[:-1] = rewardRecorder[1:]
+                rewardRecorder[-1] = reward
+                # reward应当为rewardRecorder的和，作为前面的和式计算
+                reward = np.sum(rewardRecorder)
                 
                 gameDone = done
                 #制作元组存入记忆库中
@@ -244,6 +247,8 @@ class DQNplayer:
             currentEpisodeReward = 0
             #初始化环境，主要是运行obs = env.reset()
             observation = self.env.reset()
+            # 奖励记录，供multi_step计算使用
+            rewardRecorder = np.zeros(self.trajectory_length,dtype="float64")
             # 用来维护，保存最新的若干个处理后的帧
             # 每次游戏时应该清空之前存储的状态信息
             preprocessFrameStack = deque(maxlen = frameNum_perState)
@@ -264,9 +269,19 @@ class DQNplayer:
                 action = self.epsilon_greedy(action_val)
                 #执行动作,获取新环境
                 next_observation, reward, done, _ = self.env.step(action)
+                # 考虑在此处执行Multi-step
+                # 奖励值使用多步的奖励来代替这一步的奖励，因此有
+                # rewardRecorder进行计算，全部乘以self.discount_factor后往左移动一位
+                rewardRecorder *= self.discount_factor
+                rewardRecorder[:-1] = rewardRecorder[1:]
+                rewardRecorder[-1] = reward
+                # reward应当为rewardRecorder的和，作为前面的和式计算
+                reward = np.sum(rewardRecorder)
+
                 gameDone = done
                 currentEpisodeReward += reward # 更新episode奖励
-                rewardList.append(reward)
+                rewardList.append(reward)#此处可以前移以获得原始奖励
+
 
                 #制作元组存入记忆库中
                 # 当且仅当预处理帧的数量足够的时候可以进行如此操作
@@ -302,15 +317,17 @@ class DQNplayer:
                         # 在MSE的loss计算模式下，其他地方为0，数组编号为a_t时有(y-Q(s_t,a_t))^2
                         # Double Q优化处
                         maxFutureAction = np.argmax(current_actionVal[i],axis=-1)#使用最新的网络来选择动作
-                        maxActionVal = next_actionVal[i][maxFutureAction]
-                        # TD_error = q_target - q_eval
-                        td_errors[i] = QTable[i][replay_action] - (reward_array[i] + self.discount_factor * maxActionVal)
-                        # 更新，这样keras中就可以直接计算
-                        QTable[i][replay_action] = reward_array[i] + self.discount_factor * maxActionVal
+                        maxActionVal = next_actionVal[i][maxFutureAction] #拿到目标网络中的值
+                        # multi_step公式中，此处为self.discount_factor^self.trajectory_length
+                        q_target = reward_array[i] + math.pow(self.discount_factor,self.trajectory_length) * maxActionVal
+                        # TD_error = abs(q_target - q_eval),abs放在后面计算
+                        td_errors[i] = QTable[i][replay_action] - q_target
+                        # 更新，这样keras中就可以直接计算损失函数
+                        QTable[i][replay_action] = q_target
                         
                     #喂给神经网络，使用MSE作为损失函数。进行训练
-                    history = self.Q_main.fit(np.array(obs_array),QTable,verbose=0)
-                    lossList.append(history.history["loss"])
+                    loss = self.Q_main.train_on_batch(np.array(obs_array),QTable)
+                    lossList.append(loss)
                     # priority_buffer 更新权重
                     new_priorities = np.abs(td_errors) + self.prioritized_replay_eps
                     self.memoryBuffer.update_priorities(batch_idxes, new_priorities)
