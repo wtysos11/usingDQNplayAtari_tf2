@@ -241,7 +241,9 @@ class DQNplayer:
 
         episode_total_reward = [] # 用于存放每一轮的奖励，并绘制最终曲线
         # exploration
-        self.explore(self.buffer_size) # 目的是填满缓冲区
+         # 目的是填满缓冲区。我想了一下还是不用多步了，因为计算出来的肯定是错的，所以用不用是没区别的。
+         # 最好的方式应该是保留下缓冲区的数据，供之后的训练使用。
+        self.explore(self.buffer_size)
 
         for episode_num_counter in range(episode_num):
         #对于每一个episode
@@ -335,7 +337,7 @@ class DQNplayer:
                         maxFutureAction = np.argmax(current_actionVal[i],axis=-1)#使用最新的网络来选择动作
                         maxActionVal = next_actionVal[i][maxFutureAction] #拿到目标网络中的值
                         # multi_step公式中，此处为self.discount_factor^self.trajectory_length
-                        q_target = reward_array[i] + math.pow(self.discount_factor,self.trajectory_length) * maxActionVal
+                        q_target = reward_array[i] + (1-done_array[i])*math.pow(self.discount_factor,self.trajectory_length) * maxActionVal
                         # TD_error = abs(q_target - q_eval),abs放在后面计算
                         td_errors[i] = QTable[i][replay_action] - q_target
                         # 更新，这样keras中就可以直接计算损失函数
