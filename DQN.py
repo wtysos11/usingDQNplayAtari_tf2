@@ -190,7 +190,7 @@ class DQNplayer:
         主过程，详情见上面的部分
         '''
         self.global_counting = 0 #额外超参数，每次训练重置，负责提供各个超参数的衰变
-        step_train = 4 # 每4次行动训练一次神经网络
+        step_train = 1000 # 每4次行动训练一次神经网络
         frameNum_perState = 4 # 4个环境样本组合在一起作为一个状态
         rewardFileWriter = open("episodeReward","w")
         
@@ -211,6 +211,7 @@ class DQNplayer:
             gameDone = False
             currentEpisodeReward = 0
             #初始化环境，主要是运行obs = env.reset()
+            self.env.close()
             observation = self.env.reset()
             # 奖励记录，供multi_step计算使用
             rewardRecorder = deque(maxlen=self.trajectory_length)
@@ -231,8 +232,9 @@ class DQNplayer:
                 actionRecorder.append(self.env.action_space.sample())
             #当游戏没有结束
             while not gameDone:
-                if self.global_counting % 1000 == 0:
-                    print("episode :{}/ frame : {}".format(episode_num_counter,self.global_counting))
+                self.env.render()
+                if self.global_counting % 100 == 0:
+                    logging.info("episode :{}/ frame : {}".format(episode_num_counter,self.global_counting))
                 #拿取当前环境并初始化图像（上一时刻的下一记录即为当前记录）
                 observation = self.preprocessing(observation)
                 #epsilon-greedy，拿取动作
@@ -251,14 +253,6 @@ class DQNplayer:
                 # reward应当为rewardRecorder的和，作为前面的和式计算。此时的reward为未来的奖励
                 # 具体来说，状态reward_0*gammma^0+reward_1*gammma^1+...+reward_{n-1}*gammma^{n-1}
                 # 然后最后的估计值与gamma^n相乘
-                originReward = 0.
-                discountRecord = 1
-                for rewardIndex in range(len(rewardRecorder)):
-                    originReward += rewardRecorder[rewardIndex] * discountRecord
-                    discountRecord *= self.discount_factor
-                originState = observationRecorder.popleft()
-                originAction = actionRecorder.popleft()
-
                 gameDone = done
 
                 #制作元组存入记忆库中
@@ -269,7 +263,7 @@ class DQNplayer:
                     # 更新临时记录系统。此时临时记录系统表示下一状态，在下一时刻表示当前状态。
                     preprocessFrameStack.append(self.preprocessing(next_observation))
                     # 使用np.stack制作大小为84*84*4的新状态
-                    self.memoryBuffer.add(originState,originAction,reward,np.stack(preprocessFrameStack,axis=2),done)
+                    self.memoryBuffer.add(np.array(observationRecorder),np.array(actionRecorder),np.array(rewardRecorder),np.stack(preprocessFrameStack,axis=2),done)
 
                 #如果运行了指定次数且有足够多的训练数据，则开始训练
                 if self.global_counting % step_train == 0 and \
@@ -280,33 +274,66 @@ class DQNplayer:
                     (obs_array,action_array,reward_array,next_obs_array,done_array,weights,batch_idxes) = experience
                     # weights是在duel网络中用来作为选择最佳动作的输入，这里应该是不用的
                     # 进行预处理
-                    obs_array = [x for x in obs_array]
-                    next_obs_array = [x for x in next_obs_array]
-                    current_actionVal = self.Q_main.predict(np.array(next_obs_array))
-                    # 此处一定要使用Q_target进行计算
-                    next_actionVal = self.Q_target.predict(np.array(next_obs_array)) #得到Q(s')的所有动作的向量
-                    # 计算Q表
-                    QTable = self.Q_main.predict(np.array(obs_array))
-                    # 对于每一个状态，对Q表进行更新。顺便计算td_errors
+                    # 因为使用了multi-step，所以此处obs_array的大小为batch_size * 轨迹数 * 84 * 84 * 4
+                    # 比较难算，需要重新规划一下
+                    # 计算上，对每一个batch进行单独的计算
+                    # 每一个batch内，按照顺序提取出第一个点和最后一个点，计算奖励函数，生成训练数据对
+                    # 在训练数据对内完成训练
                     td_errors = np.zeros(batch_size)
-                    for i in range(len(obs_array)):
-                        replay_action = action_array[i]
-                        # Q*(s,a) = r + \gamma * Q'(s',a')
-                        # 此处的思路是这样的，最终要求的损失值是(y-Q(s_t,a_t))^2
-                        # 如果将Q(s_t)的动作a_t部分更换成新的y，其他地方不变
-                        # 在MSE的loss计算模式下，其他地方为0，数组编号为a_t时有(y-Q(s_t,a_t))^2
-                        # Double Q优化处
-                        maxFutureAction = np.argmax(current_actionVal[i],axis=-1)#使用最新的网络来选择动作
-                        maxActionVal = next_actionVal[i][maxFutureAction] #拿到目标网络中的值
-                        # multi_step公式中，此处为self.discount_factor^self.trajectory_length
-                        q_target = reward_array[i] + (1-done_array[i])*math.pow(self.discount_factor,self.trajectory_length) * maxActionVal
-                        # TD_error = abs(q_target - q_eval),abs放在后面计算
-                        td_errors[i] = QTable[i][replay_action] - q_target
-                        # 更新，这样keras中就可以直接计算损失函数
-                        QTable[i][replay_action] = q_target
+                    trainX = []
+                    trainY = []
+                    for batch_id in range(len(obs_array)):
+                        futureState = next_obs_array[batch_id] # 最后一个状态
+                        isDone = done_array[batch_id] # 最后一个状态是否完成
+                        currentObsSet = obs_array[batch_id]
+                        currentActSet = action_array[batch_id]
+                        currentRewSet = reward_array[batch_id]
+                        for begin_state_index in range(len(obs_array[batch_id])): #轨迹的开始点，从最开始到最后一个都可以
+                            for end_state_index in range(begin_state_index,len(obs_array[batch_id])): #轨迹的结束点是在end_state的后一个
+                                # 因为是后一个，所以是包括begin_state_index的
+                                # 轨迹长度，要考虑到最后有一个单独的futureState
+                                current_trajectory_length = end_state_index+1 - begin_state_index #这个是从gamma计算考虑的。如果两个是临近的话，那计算的时候就有
+                                # 理论上multi-step是只有current_trajectory_length的，但是实际上效果好像也不怎么好
+                                if current_trajectory_length != 1 and current_trajectory_length != self.trajectory_length:
+                                    continue
+                                
+                                # 计算开始与结束的状态值，方便计算动作
+                                startState = currentObsSet[begin_state_index]
+                                startAction = currentActSet[begin_state_index] # 即replay_action
+                                
+                                if end_state_index+1 == len(obs_array[batch_id]):
+                                    endState = futureState
+                                    currentDone = isDone
+                                else:
+                                    endState = currentObsSet[end_state_index+1]
+                                    currentDone = False
+                                # 计算奖励值：奖励值reward = r_0*gamma^0+r_1*gamma^1+...+r_{n-1}*gamma^{n-1}
+                                currentReward = 0.
+                                gammaFactor = 1.
+                                for rewardCalculateIndex in range(current_trajectory_length):
+                                    currentReward += currentRewSet[begin_state_index+rewardCalculateIndex] * gammaFactor
+                                    gammaFactor *= self.discount_factor
+
+                                #开始计算s'处的最大动作值
+                                # 使用policy_network计算s'的action_val
+                                current_actionVal = self.Q_main.predict(np.array([endState])).ravel()
+                                # 使用target_network计算s'的action_val
+                                next_actionVal = self.Q_target.predict(np.array([endState])).ravel()
+                                # 使用policy_network计算s的action_val
+                                QTable = self.Q_main.predict(np.array([startState])).ravel()
+                                # Double Q-Network，使用policy_network选择最大动作，并根据动作使用target_network选择动作的值
+                                maxFutureAction = np.argmax(current_actionVal,axis=-1)
+                                maxActionVal = next_actionVal[maxFutureAction]
+                                # 计算q_target，并计算td_errors
+                                q_target = currentReward + (1-currentDone)*gammaFactor * maxActionVal # gammaFactor应该为discount^n
+                                td_errors[batch_id] += QTable[startAction] - q_target
+                                # 算出目标Q值并更新，然后将其存起来准备压入
+                                QTable[startAction] = q_target
+                                trainX.append(startState)
+                                trainY.append(QTable)
                         
                     #喂给神经网络，使用MSE作为损失函数。进行训练
-                    loss = self.Q_main.train_on_batch(np.array(obs_array),QTable)
+                    loss = self.Q_main.train_on_batch(np.array(trainX),np.array(trainY))
                     lossList.append(loss)
                     # priority_buffer 更新权重
                     new_priorities = np.abs(td_errors) + self.prioritized_replay_eps
@@ -363,7 +390,7 @@ class DQNplayer:
         分为两种情况，如果是RGB数据，则将其映射到[0,1]上，即除以255
         如果是RAM数据，则直接返回
         '''
-        if self.networkName == "conv2d":
+        if self.networkName == "conv2d" or self.networkName == "duel":
             observation = observation[34:-16, :, :] # 裁剪掉上下的无用部分
             resized_frame = cv2.resize(observation, (84, 84), interpolation = cv2.INTER_AREA)
             frame_gray = rgb2gray(resized_frame)
