@@ -76,6 +76,7 @@ class SegmentTree(object):
     def __setitem__(self, idx, val):
         # index of the leaf
         idx += self._capacity
+        idx = int(idx)
         self._value[idx] = val
         idx //= 2
         while idx >= 1:
