@@ -192,6 +192,7 @@ class DQNplayer:
         self.global_counting = 0 #额外超参数，每次训练重置，负责提供各个超参数的衰变
         step_train = 4 # 每4次行动训练一次神经网络
         frameNum_perState = 4 # 4个环境样本组合在一起作为一个状态
+        rewardFileWriter = open("episodeReward","w")
         
         # 声明规划器
         self.prioritized_replay_beta_iters = episode_num * 1500
@@ -321,11 +322,15 @@ class DQNplayer:
                 self.global_counting += 1
             #记录episode总奖励
             episode_total_reward.append(currentEpisodeReward)
+            # 记录在文件中
+            rewardFileWriter.write("{}\n".format(currentEpisodeReward))
+            rewardFileWriter.flush()
             logging.warning("episode {} 's reward {}, loss {}".format(episode_num_counter,currentEpisodeReward,np.mean(lossList)))
             logging.warning("reward distribute: max reward {}/ minreward {}".format(max(rewardList),min(rewardList)))
             if episode_num_counter % 500 == 0 and episode_num_counter > 0:
                 self.savemodel(str(episode_num_counter))
         # 训练完毕
+        rewardFileWriter.close()
         plt.cla()
         plt.plot(episode_total_reward)
         plt.show()
