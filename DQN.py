@@ -115,7 +115,7 @@ class DQNplayer:
         Q_main，神经网络，主要训练函数。输入为Atari状态，输出为大小等于动作空间的向量
         Q_target，Q_main的旧有拷贝，负责切断因果性进行最大动作估计。
     '''
-    def __init__(self,name="Pong-v0",networkName="conv2d",max_memory_length = 5000):
+    def __init__(self,name="Pong-v0",networkName="conv2d",max_memory_length = 20000):
         '''
         初始化，这里应该声明网络和超参数
         Args:
@@ -126,7 +126,7 @@ class DQNplayer:
         self.gameName = name
         self.networkName = networkName
         # 构建网络
-        self.learning_rate = 0.001
+        self.learning_rate = 0.0001
         Builder = NeuralNetworkBuilder(self.learning_rate)
         network_input = (84,84,4) # 根据skip frame得到的形状
         self.Q_main = Builder.build_network(network_input,self.env.action_space.n,name = networkName)
@@ -147,15 +147,15 @@ class DQNplayer:
         # 声明超参数
         # epsilon控制系统
         # epsilon min max decay rate...
-        self.epsilon_min = 0.05
+        self.epsilon_min = 0.02
         self.epsilon_max = 1.0
         self.epsilon_decay_steps = 100000
 
         # 学习率
-        self.trajectory_length = 10 # multi-step的轨迹长度
-        self.discount_factor = 0.97
+        self.trajectory_length = 4 # multi-step的轨迹长度, Rainbow原文用了3，我觉得4也差不多。
+        self.discount_factor = 0.99
         # Q_target更新速率
-        self.target_update_rate = 10000
+        self.target_update_rate = 1000
 
     def explore(self,training_step = 50000):
         '''
@@ -181,6 +181,7 @@ class DQNplayer:
             #初始化环境，主要是运行obs = env.reset()
             observation = self.env.reset()
             rewardRecorder = np.zeros(self.trajectory_length,dtype="float64")
+            stateRecorder = deque(maxlen = self.trajectory_length)
             # 每次游戏时应该清空之前存储的状态信息
             preprocessFrameStack = deque(maxlen = frameNum_perState)
             #当游戏没有结束
@@ -197,16 +198,18 @@ class DQNplayer:
                 action = self.env.action_space.sample()
                 #执行动作,获取新环境
                 next_observation, reward, done, _ = self.env.step(action)
+                # 处理reward
                 rewardRecorder *= self.discount_factor
                 rewardRecorder[:-1] = rewardRecorder[1:]
                 rewardRecorder[-1] = reward
                 # reward应当为rewardRecorder的和，作为前面的和式计算
                 reward = np.sum(rewardRecorder)
-                
+
                 gameDone = done
                 #制作元组存入记忆库中
                 # 当且仅当预处理帧的数量足够的时候可以进行如此操作
-                if len(preprocessFrameStack)>=frameNum_perState:
+                # 且multi-step的状态满足最大值
+                if len(preprocessFrameStack)>=frameNum_perState and len(stateRecorder) >= self.trajectory_length:
                     # 制作新的临时队列来保存新的预处理帧
                     temp_stack = preprocessFrameStack.copy()
                     temp_stack.append(self.preprocessing(next_observation))
@@ -249,49 +252,59 @@ class DQNplayer:
             observation = self.env.reset()
             # 奖励记录，供multi_step计算使用
             rewardRecorder = np.zeros(self.trajectory_length,dtype="float64")
+            observationRecorder = deque(maxlen=self.trajectory_length) #里面存放的是84*84*4的处理后数据，与神经网络的输入数据相同
+            actionRecorder = deque(maxlen=self.trajectory_length)
+            
             # 用来维护，保存最新的若干个处理后的帧
             # 每次游戏时应该清空之前存储的状态信息
             preprocessFrameStack = deque(maxlen = frameNum_perState)
             rewardList = []
             lossList = []
+            # 预处理，直接填满
+            while len(preprocessFrameStack) < frameNum_perState:
+                preprocessFrameStack.append(self.preprocessing(observation)) #仅在此处添加状态，将新的处理后的状态加入
+            while len(observationRecorder) < self.trajectory_length:
+                observationRecorder.append(np.stack(preprocessFrameStack,axis=2))
+            while len(actionRecorder) < self.trajectory_length:
+                actionRecorder.append(self.env.action_space.sample())
             #当游戏没有结束
             while not gameDone:
                 if self.global_counting % 1000 == 0:
                     print("episode :{}/ frame : {}".format(episode_num_counter,self.global_counting))
                 #拿取当前环境并初始化图像（上一时刻的下一记录即为当前记录）
                 observation = self.preprocessing(observation)
-                # 直接填满，目的是为了对齐状态
-                while len(preprocessFrameStack) < frameNum_perState:
-                    preprocessFrameStack.append(observation) #仅在此处添加状态，将新的处理后的状态加入
-                
                 #epsilon-greedy，拿取动作
                 action_val = self.Q_main.predict(np.array([np.stack(preprocessFrameStack,axis=2)])) # 这里需要思考一下，我觉得应该是要上升为数组再开回来
                 action = self.epsilon_greedy(action_val)
                 #执行动作,获取新环境
                 next_observation, reward, done, _ = self.env.step(action)
+                currentEpisodeReward += reward # 更新episode奖励
+                rewardList.append(reward)
+
                 # 考虑在此处执行Multi-step
-                # 奖励值使用多步的奖励来代替这一步的奖励，因此有
+                # multi-step的本质实质上就是用下n步的奖励来代替这一步的奖励，从而更好的完成估计。因此需要维护一个未来的奖励数组
                 # rewardRecorder进行计算，全部乘以self.discount_factor后往左移动一位
                 rewardRecorder *= self.discount_factor
                 rewardRecorder[:-1] = rewardRecorder[1:]
                 rewardRecorder[-1] = reward
-                # reward应当为rewardRecorder的和，作为前面的和式计算
+                # reward应当为rewardRecorder的和，作为前面的和式计算。此时的reward为未来的奖励
                 reward = np.sum(rewardRecorder)
+                originState = observationRecorder.popleft()
+                originAction = actionRecorder.popleft()
 
                 gameDone = done
-                currentEpisodeReward += reward # 更新episode奖励
-                rewardList.append(reward)#此处可以前移以获得原始奖励
-
 
                 #制作元组存入记忆库中
                 # 当且仅当预处理帧的数量足够的时候可以进行如此操作
+                # 一般都是够的
                 if len(preprocessFrameStack) >= frameNum_perState:
                     # 制作新的临时队列来保存新的预处理帧
-                    temp_stack = preprocessFrameStack.copy()
-                    temp_stack.append(self.preprocessing(next_observation))
+                    # 顺便更新临时记录系统
+                    preprocessFrameStack.append(self.preprocessing(next_observation))
+                    observationRecorder.append(np.stack(preprocessFrameStack,axis=2))
+                    actionRecorder.append(action)
                     # 使用np.stack制作大小为84*84*4的新状态
-                    self.memoryBuffer.add(np.stack(preprocessFrameStack,axis=2),action,reward,np.stack(temp_stack,axis=2),done)
-                    del temp_stack
+                    self.memoryBuffer.add(originState,originAction,reward,np.stack(preprocessFrameStack,axis=2),done)
 
                 #如果运行了指定次数且有足够多的训练数据，则开始训练
                 if self.global_counting % step_train == 0 and len(self.memoryBuffer) >= batch_size:
