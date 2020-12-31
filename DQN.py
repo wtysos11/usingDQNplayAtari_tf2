@@ -240,6 +240,7 @@ class DQNplayer:
                 action = self.epsilon_greedy(action_val)
                 #执行动作,获取新环境
                 next_observation, reward, done, _ = self.env.step(action)
+                gameDone = done
                 currentEpisodeReward += reward # 更新episode奖励
                 rewardList.append(reward)
 
@@ -248,28 +249,19 @@ class DQNplayer:
                 observationRecorder.append(np.stack(preprocessFrameStack,axis=2))
                 actionRecorder.append(action) #状态所对应的动作应该加入
                 rewardRecorder.append(reward) #动作所对应的奖励应该加入
+                preprocessFrameStack.append(self.preprocessing(next_observation))
                 # reward应当为rewardRecorder的和，作为前面的和式计算。此时的reward为未来的奖励
                 # 具体来说，状态reward_0*gammma^0+reward_1*gammma^1+...+reward_{n-1}*gammma^{n-1}
                 # 然后最后的估计值与gamma^n相乘
-                originReward = 0.
-                discountRecord = 1
-                for rewardIndex in range(len(rewardRecorder)):
-                    originReward += rewardRecorder[rewardIndex] * discountRecord
-                    discountRecord *= self.discount_factor
-                originState = observationRecorder.popleft()
-                originAction = actionRecorder.popleft()
-
-                gameDone = done
-
-                #制作元组存入记忆库中
-                # 当且仅当预处理帧的数量足够的时候可以进行如此操作
-                # 一般都是够的
-                if len(preprocessFrameStack) >= frameNum_perState:
-                    # 制作新的临时队列来保存新的预处理帧
-                    # 更新临时记录系统。此时临时记录系统表示下一状态，在下一时刻表示当前状态。
-                    preprocessFrameStack.append(self.preprocessing(next_observation))
-                    # 使用np.stack制作大小为84*84*4的新状态
-                    self.memoryBuffer.add(originState,originAction,reward,np.stack(preprocessFrameStack,axis=2),done)
+                for beginPoint in range(len(observationRecorder)):
+                    originReward = 0.
+                    discountRecord = 1
+                    for rewardIndex in range(beginPoint,len(rewardRecorder)):
+                        originReward += rewardRecorder[rewardIndex] * discountRecord
+                        discountRecord *= self.discount_factor
+                    originState = observationRecorder[0]
+                    originAction = actionRecorder[0]
+                    self.memoryBuffer.add(originState,originAction,reward,np.stack(preprocessFrameStack,axis=2),done,self.trajectory_length-beginPoint)
 
                 #如果运行了指定次数且有足够多的训练数据，则开始训练
                 if self.global_counting % step_train == 0 and \
@@ -363,7 +355,7 @@ class DQNplayer:
         分为两种情况，如果是RGB数据，则将其映射到[0,1]上，即除以255
         如果是RAM数据，则直接返回
         '''
-        if self.networkName == "conv2d":
+        if self.networkName == "conv2d" or self.networkName == "duel":
             observation = observation[34:-16, :, :] # 裁剪掉上下的无用部分
             resized_frame = cv2.resize(observation, (84, 84), interpolation = cv2.INTER_AREA)
             frame_gray = rgb2gray(resized_frame)
