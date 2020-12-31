@@ -2,7 +2,7 @@ import tensorflow.keras as keras
 import tensorflow.keras.backend as K
 from tensorflow.keras.layers import Input,Flatten,Dense,Conv2D,LeakyReLU,Multiply,Lambda
 from tensorflow.keras.models import Model
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.optimizers import Adam,RMSprop
 import gym
 
 import cv2
@@ -26,7 +26,7 @@ class NeuralNetworkBuilder:
         '''
         self.learning_rate = learning_rate
     
-    def build_conv2d(self,n_input,n_output):
+    def build_duel(self,n_input,n_output):
         '''
         Args:
             n_input 输入数据的维数，这里应该是图像的大小
@@ -63,7 +63,33 @@ class NeuralNetworkBuilder:
 
         # 声明模型，并返回它
         model = Model(inputs=[model_input], outputs=[policy])
-        model.compile(loss="mse",optimizer=Adam(self.learning_rate))
+        model.compile(loss=keras.losses.Huber(),optimizer=Adam(self.learning_rate))
+        return model
+
+    def build_conv2d(self,n_input,n_output):
+        '''
+        Args:
+            n_input 输入数据的维数，这里应该是图像的大小
+            n_output 输出数据的维数，这里应该是动作空间的大小
+        Returns:
+            model 返回一个Keras类型的model
+        Reference:
+            参考了https://github.com/keras-rl/keras-rl 的网络架构
+        '''
+        # Game-specific 游戏特化代码，如果后续要做泛化的话需要修改此处
+        model_input = Input(shape=n_input)
+        # 初始化完毕后是三层Conv2D+BN(可能可以不加？先不加看一下效果)
+        conv1 = Conv2D(32,(8,8),strides=(4,4),activation='relu')(model_input)
+        conv2 = Conv2D(64,(4,4),strides=(2,2),activation='relu')(conv1)
+        conv3 = Conv2D(64,(3,3),strides=(1,1),activation='relu')(conv2)
+        # 再之后是两层全连接层，确保最后的输出向量维数为action_space的大小
+        flatten = Flatten()(conv3)
+        fc1 = Dense(512)(flatten)
+        model_output = Dense(n_output)(fc1)
+
+        # 声明模型，并返回它
+        model = Model(inputs=[model_input], outputs=[model_output])
+        model.compile(loss=keras.losses.Huber(),optimizer=RMSprop(self.learning_rate))
         return model
 
     def build_network(self,n_input,n_output,name="conv2d"):
@@ -76,7 +102,9 @@ class NeuralNetworkBuilder:
         Returns:
             model 返回一个Keras类型的model
         '''
-        if name=="conv2d":
+        if name=="duel":
+            return self.build_duel(n_input,n_output)
+        elif name == "conv2d":
             return self.build_conv2d(n_input,n_output)
 
 
@@ -295,7 +323,7 @@ class DQNplayer:
             episode_total_reward.append(currentEpisodeReward)
             logging.warning("episode {} 's reward {}, loss {}".format(episode_num_counter,currentEpisodeReward,np.mean(lossList)))
             logging.warning("reward distribute: max reward {}/ minreward {}".format(max(rewardList),min(rewardList)))
-            if episode_num_counter % 1000 == 0 and episode_num_counter > 0:
+            if episode_num_counter % 500 == 0 and episode_num_counter > 0:
                 self.savemodel(str(episode_num_counter))
         # 训练完毕
         plt.cla()

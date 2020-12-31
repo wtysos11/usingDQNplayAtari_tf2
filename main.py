@@ -8,7 +8,7 @@ def main():
     logger.console_out("output.txt")
 
     #player = DQN.DQNplayer(name="Pong-v0",networkName="conv2d") #声明player，使用Conv2D解析RGB
-    player = DQN.DQNplayer(name="Breakout-v0",networkName="conv2d")
+    player = DQN.DQNplayer(name="Breakout-v0",networkName="duel")
     player.main_process() # 进行训练，训练过程中要绘制episode总奖励曲线
     # 选择保存模型
     player.savemodel("Q_main")
