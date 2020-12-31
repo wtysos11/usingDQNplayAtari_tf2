@@ -265,8 +265,6 @@ class DQNplayer:
                 # 然后最后的估计值与gamma^n相乘
                 currentEpsilonVal = max(self.epsilon_min,self.epsilon_max-(self.epsilon_max - self.epsilon_min) * self.global_counting/self.epsilon_decay_steps)
                 for beginPoint in range(len(observationRecorder)):
-                    if currentEpsilonVal < 0.15 and beginPoint>0:
-                        break
                     originReward = 0.
                     discountRecord = 1
                     for rewardIndex in range(beginPoint,len(rewardRecorder)):
@@ -277,6 +275,7 @@ class DQNplayer:
                     # 如果是第一次，则直接将记忆库填满
                     while len(self.memoryBuffer) < self.buffer_size:
                         self.memoryBuffer.add(originState,self.env.action_space.sample(),reward,observation,done,self.trajectory_length-beginPoint)
+                    self.memoryBuffer.add(originState,originAction,reward,observation,done,self.trajectory_length-beginPoint)
                 #如果运行了指定次数且有足够多的训练数据，则开始训练
                 if (self.global_counting > self.learning_starts and self.global_counting % step_train == 0 and \
                     len(self.memoryBuffer) >= batch_size) or \
