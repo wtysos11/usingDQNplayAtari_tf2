@@ -157,74 +157,6 @@ class DQNplayer:
         # Q_target更新速率
         self.target_update_rate = 1000
 
-    def explore(self,training_step = 50000):
-        '''
-        探索过程，目的是填充memory_buffer
-        进行随机的动作
-        Args:
-            training_step 决定探索次数
-        Returns:
-            没有返回值，仅修改self.memoryBuffer
-        '''
-        training_counting = 0 #额外超参数，每次训练重置，负责提供各个超参数的衰变
-        episode_num_counter = 0
-        step_train = 4 # 每4次行动训练一次神经网络
-        frameNum_perState = 4 # 4个环境样本组合在一起作为一个状态
-        
-        # exploration
-        logging.warning("Start Training")
-        while training_counting < training_step:
-        #对于每一个episode
-            logging.warning("training episode num {}/{} start".format(episode_num_counter,training_counting))
-            gameDone = False
-            
-            #初始化环境，主要是运行obs = env.reset()
-            observation = self.env.reset()
-            rewardRecorder = np.zeros(self.trajectory_length,dtype="float64")
-            stateRecorder = deque(maxlen = self.trajectory_length)
-            # 每次游戏时应该清空之前存储的状态信息
-            preprocessFrameStack = deque(maxlen = frameNum_perState)
-            #当游戏没有结束
-            while not gameDone:
-                if training_counting % 1000 == 0:
-                    print("exploration episode :{}/ frame : {}".format(episode_num_counter,training_counting))
-                #拿取当前环境并初始化图像（上一时刻的下一记录即为当前记录）
-                observation = self.preprocessing(observation)
-                # 直接填满，目的是为了对齐状态
-                while len(preprocessFrameStack) < frameNum_perState:
-                    preprocessFrameStack.append(observation) #仅在此处添加状态，将新的处理后的状态加入
-                
-                #epsilon-greedy，拿取动作
-                action = self.env.action_space.sample()
-                #执行动作,获取新环境
-                next_observation, reward, done, _ = self.env.step(action)
-                # 处理reward
-                rewardRecorder *= self.discount_factor
-                rewardRecorder[:-1] = rewardRecorder[1:]
-                rewardRecorder[-1] = reward
-                # reward应当为rewardRecorder的和，作为前面的和式计算
-                reward = np.sum(rewardRecorder)
-
-                gameDone = done
-                #制作元组存入记忆库中
-                # 当且仅当预处理帧的数量足够的时候可以进行如此操作
-                # 且multi-step的状态满足最大值
-                if len(preprocessFrameStack)>=frameNum_perState and len(stateRecorder) >= self.trajectory_length:
-                    # 制作新的临时队列来保存新的预处理帧
-                    temp_stack = preprocessFrameStack.copy()
-                    temp_stack.append(self.preprocessing(next_observation))
-                    # 使用np.stack制作大小为84*84*4的新状态
-                    self.memoryBuffer.add(np.stack(preprocessFrameStack,axis=2),action,reward,np.stack(temp_stack,axis=2),done)
-                    del temp_stack
-
-                training_counting += 1
-
-                # 计数器更新
-                observation = next_observation
-            episode_num_counter += 1
-            #记录episode总奖励
-        logging.warning("End Training")
-
     def main_process(self,episode_num = 10000,batch_size = 32):
         '''
         主过程，详情见上面的部分
@@ -243,7 +175,6 @@ class DQNplayer:
         # exploration
          # 目的是填满缓冲区。我想了一下还是不用多步了，因为计算出来的肯定是错的，所以用不用是没区别的。
          # 最好的方式应该是保留下缓冲区的数据，供之后的训练使用。
-        self.explore(self.buffer_size)
 
         for episode_num_counter in range(episode_num):
         #对于每一个episode
@@ -312,7 +243,9 @@ class DQNplayer:
                     self.memoryBuffer.add(originState,originAction,reward,np.stack(preprocessFrameStack,axis=2),done)
 
                 #如果运行了指定次数且有足够多的训练数据，则开始训练
-                if self.global_counting % step_train == 0 and len(self.memoryBuffer) >= batch_size:
+                if self.global_counting % step_train == 0 and \
+                    len(self.memoryBuffer) >= batch_size and \
+                    self.global_counting > self.buffer_size:
                     #从记忆库拿取数据，转换成数组形式
                     experience = self.memoryBuffer.sample(batch_size,beta = self.beta_schedule.value(self.global_counting))
                     (obs_array,action_array,reward_array,next_obs_array,done_array,weights,batch_idxes) = experience
