@@ -166,7 +166,7 @@ class DQNplayer:
         self.gameName = name
         self.networkName = networkName
         # 构建网络
-        self.learning_rate = 0.0001
+        self.learning_rate = 1e-4
         Builder = NeuralNetworkBuilder(self.learning_rate)
         network_input = (84,84,4) # 根据skip frame得到的形状
         self.Q_main = Builder.build_network(network_input,self.env.action_space.n,name = networkName)
@@ -184,10 +184,12 @@ class DQNplayer:
         self.prioritized_replay_beta0 = 0.4 # 用于在sample中充当参数
         self.prioritized_replay_eps = 1e-6 #用于更新priority
         self.memoryBuffer = PrioritizedReplayBuffer(self.buffer_size,self.prioritized_replay_alpha)
+
+        self.learning_starts = 10000
         # 声明超参数
         # epsilon控制系统
         # epsilon min max decay rate...
-        self.epsilon_min = 0.02
+        self.epsilon_min = 0.01
         self.epsilon_max = 1.0
         self.epsilon_decay_steps = 100000
 
@@ -261,7 +263,10 @@ class DQNplayer:
                 # reward应当为rewardRecorder的和，作为前面的和式计算。此时的reward为未来的奖励
                 # 具体来说，状态reward_0*gammma^0+reward_1*gammma^1+...+reward_{n-1}*gammma^{n-1}
                 # 然后最后的估计值与gamma^n相乘
+                currentEpsilonVal = max(self.epsilon_min,self.epsilon_max-(self.epsilon_max - self.epsilon_min) * self.global_counting/self.epsilon_decay_steps)
                 for beginPoint in range(len(observationRecorder)):
+                    if currentEpsilonVal < 0.15 and beginPoint>0:
+                        break
                     originReward = 0.
                     discountRecord = 1
                     for rewardIndex in range(beginPoint,len(rewardRecorder)):
@@ -271,10 +276,11 @@ class DQNplayer:
                     originAction = actionRecorder[0]
                     # 如果是第一次，则直接将记忆库填满
                     while len(self.memoryBuffer) < self.buffer_size:
-                        self.memoryBuffer.add(originState,originAction,reward,observation,done,self.trajectory_length-beginPoint)
+                        self.memoryBuffer.add(originState,self.env.action_space.sample(),reward,observation,done,self.trajectory_length-beginPoint)
                 #如果运行了指定次数且有足够多的训练数据，则开始训练
-                if self.global_counting % step_train == 0 and \
-                    len(self.memoryBuffer) >= batch_size:
+                if (self.global_counting > self.learning_starts and self.global_counting % step_train == 0 and \
+                    len(self.memoryBuffer) >= batch_size) or \
+                    gameDone:
                     #self.global_counting > self.buffer_size:
                     #从记忆库拿取数据，转换成数组形式
                     experience = self.memoryBuffer.sample(batch_size,beta = self.beta_schedule.value(self.global_counting))
