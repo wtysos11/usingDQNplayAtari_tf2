@@ -251,7 +251,7 @@ class DQNplayer:
             #初始化环境，主要是运行obs = env.reset()
             observation = self.env.reset()
             # 奖励记录，供multi_step计算使用
-            rewardRecorder = np.zeros(self.trajectory_length,dtype="float64")
+            rewardRecorder = deque(maxlen=self.trajectory_length)
             observationRecorder = deque(maxlen=self.trajectory_length) #里面存放的是84*84*4的处理后数据，与神经网络的输入数据相同
             actionRecorder = deque(maxlen=self.trajectory_length)
             
@@ -281,14 +281,19 @@ class DQNplayer:
                 currentEpisodeReward += reward # 更新episode奖励
                 rewardList.append(reward)
 
-                # 考虑在此处执行Multi-step
+                # 考虑在此处执行Multi-step。进行全面的更新，以当前为0，压入S_0,a_0,reward_0
                 # multi-step的本质实质上就是用下n步的奖励来代替这一步的奖励，从而更好的完成估计。因此需要维护一个未来的奖励数组
-                # rewardRecorder进行计算，全部乘以self.discount_factor后往左移动一位
-                rewardRecorder *= self.discount_factor
-                rewardRecorder[:-1] = rewardRecorder[1:]
-                rewardRecorder[-1] = reward
+                observationRecorder.append(np.stack(preprocessFrameStack,axis=2))
+                actionRecorder.append(action) #状态所对应的动作应该加入
+                rewardRecorder.append(reward) #动作所对应的奖励应该加入
                 # reward应当为rewardRecorder的和，作为前面的和式计算。此时的reward为未来的奖励
-                reward = np.sum(rewardRecorder)
+                # 具体来说，状态reward_0*gammma^0+reward_1*gammma^1+...+reward_{n-1}*gammma^{n-1}
+                # 然后最后的估计值与gamma^n相乘
+                originReward = 0.
+                discountRecord = 1
+                for rewardIndex in range(len(rewardRecorder)):
+                    originReward += rewardRecorder[rewardIndex] * discountRecord
+                    discountRecord *= self.discount_factor
                 originState = observationRecorder.popleft()
                 originAction = actionRecorder.popleft()
 
@@ -299,10 +304,8 @@ class DQNplayer:
                 # 一般都是够的
                 if len(preprocessFrameStack) >= frameNum_perState:
                     # 制作新的临时队列来保存新的预处理帧
-                    # 顺便更新临时记录系统
+                    # 更新临时记录系统。此时临时记录系统表示下一状态，在下一时刻表示当前状态。
                     preprocessFrameStack.append(self.preprocessing(next_observation))
-                    observationRecorder.append(np.stack(preprocessFrameStack,axis=2))
-                    actionRecorder.append(action)
                     # 使用np.stack制作大小为84*84*4的新状态
                     self.memoryBuffer.add(originState,originAction,reward,np.stack(preprocessFrameStack,axis=2),done)
 
