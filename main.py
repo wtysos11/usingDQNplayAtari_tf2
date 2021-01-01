@@ -14,6 +14,7 @@ def main():
     logging.warning("warning test") 
 
     hyper_param = {
+        "lockSeed":True,
         "seed": 42,  # which seed to use
         "env": "PongNoFrameskip-v4",  # name of the game
         "replay-buffer-size": int(5e3),  # replay buffer size
@@ -35,7 +36,9 @@ def main():
         "use_priority_buffer":True,
         "prioritized_replay_alpha": 0.6,
         "prioritized_replay_beta0": 0.4,
-        "prioritized_replay_eps": 1e-6
+        "prioritized_replay_eps": 1e-6,
+        "load_model":False,
+        "load_model_name":"500"
     }
     if hyper_param["use_duel"]:
         player = DQN.DQNplayer(networkName="duel",hyper_param = hyper_param)

@@ -14,7 +14,7 @@ from collections import deque
 import logging
 import math
 
-from replay_buffer import ReplayBuffer
+from replay_buffer import ReplayBuffer,PrioritizedReplayBuffer,LinearSchedule
 from wrappers import *
 
 class NeuralNetworkBuilder:
@@ -126,6 +126,9 @@ class DQNplayer:
         self.hyper_param = hyper_param
 
         self.env = gym.make(hyper_param["env"])
+        if hyper_param["lockSeed"]:
+            self.env.seed(hyper_param["seed"])
+            np.random.seed(hyper_param["seed"])
         self.env = NoopResetEnv(self.env, noop_max=30)
         self.env = MaxAndSkipEnv(self.env, skip=4)
         self.env = EpisodicLifeEnv(self.env)
@@ -154,7 +157,13 @@ class DQNplayer:
         # 第三，计算完成之后要将td_errors用来更新权重。关键在于td_error怎么计算，按论文上的说法，TD-error = q-target - q-eval
         # new_priorities = abs(td_error) + epsilon(1e-6)，然后调用replay_buffer.update_priorities方法
         self.buffer_size = hyper_param["replay-buffer-size"]
-        self.memoryBuffer = ReplayBuffer(hyper_param["replay-buffer-size"])
+        if hyper_param["use_priority_buffer"]:
+            self.prioritized_replay_alpha = hyper_param["prioritized_replay_alpha"]
+            self.prioritized_replay_beta0 = hyper_param["prioritized_replay_beta0"]
+            self.prioritized_replay_eps = hyper_param["prioritized_replay_eps"]
+            self.memoryBuffer = PrioritizedReplayBuffer(hyper_param["replay-buffer-size"],self.prioritized_replay_alpha)
+        else:
+            self.memoryBuffer = ReplayBuffer(hyper_param["replay-buffer-size"])
 
         self.learning_starts = hyper_param["learning-starts"]
         # 声明超参数
@@ -178,8 +187,13 @@ class DQNplayer:
         batch_size = self.hyper_param["batch-size"]
         step_train = self.hyper_param["learning-freq"]
         rewardFileWriter = open("episodeReward","w")
-        
         # 声明规划器
+        if self.hyper_param["use_priority_buffer"]:
+            self.prioritized_replay_beta_iters = num_steps
+            self.beta_schedule = LinearSchedule(self.prioritized_replay_beta_iters,
+                                       initial_p=self.prioritized_replay_beta0,
+                                       final_p=1.0)
+        
         episode_total_reward = [] # 用于存放每一轮的奖励，并绘制最终曲线
         # exploration
          # 目的是填满缓冲区。我想了一下还是不用多步了，因为计算出来的肯定是错的，所以用不用是没区别的。
@@ -223,8 +237,14 @@ class DQNplayer:
                 if self.global_counting > self.learning_starts and self.global_counting % step_train == 0:
                     #self.global_counting > self.buffer_size:
                     #从记忆库拿取数据，转换成数组形式
-                    experience = self.memoryBuffer.sample(batch_size)
-                    (obs_array,action_array,reward_array,next_obs_array,done_array) = experience
+
+                    
+                    if self.hyper_param["use_priority_buffer"]:
+                        experience = self.memoryBuffer.sample(batch_size,beta = self.beta_schedule.value(self.global_counting))
+                        (obs_array,action_array,reward_array,next_obs_array,done_array,weights,batch_idxes) = experience
+                    else:
+                        experience = self.memoryBuffer.sample(batch_size)
+                        (obs_array,action_array,reward_array,next_obs_array,done_array) = experience
                     # weights是在duel网络中用来作为选择最佳动作的输入，这里应该是不用的
                     # 进行预处理
                     policyNetworkFutureActionval = self.policy_network.predict(np.array(next_obs_array))
@@ -237,6 +257,11 @@ class DQNplayer:
                     maxActionVal = targetNetworkFutureActionval[np.arange(len(targetNetworkFutureActionval)),maxFutureAction]
                     #q_target = reward_array + (1-done_array)*self.discount_factor * maxActionVal
                     # 对于每一个状态，对Q表进行更新。顺便计算td_errors
+                    if self.hyper_param["use_priority_buffer"]:
+                        td_errors = policyNetworkCurrentActionval[np.arange(len(targetNetworkFutureActionval)),action_array] - maxActionVal
+                        new_priorities = np.abs(td_errors) + self.prioritized_replay_eps
+                        self.memoryBuffer.update_priorities(batch_idxes, new_priorities)
+                    
                     policyNetworkCurrentActionval[np.arange(len(targetNetworkFutureActionval)),action_array] = maxActionVal
                         
                     #喂给神经网络，使用MSE作为损失函数。进行训练
