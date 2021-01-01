@@ -28,10 +28,19 @@ def main():
         "eps-start": 1,  # e-greedy start threshold
         "eps-end": 0.01,  # e-greedy end threshold
         "eps-fraction": 0.1,  # fraction of num-steps
-        "backup_record_step": 10000 # frequence of saving network
+        "backup_record_step": 10000, # frequence of saving network
+        "use_duel":True,
+        "use_multi_step":True,
+        "trajectory_length":4,
+        "use_priority_buffer":True,
+        "prioritized_replay_alpha": 0.6,
+        "prioritized_replay_beta0": 0.4,
+        "prioritized_replay_eps": 1e-6
     }
-
-    player = DQN.DQNplayer(networkName="conv2d",hyper_param = hyper_param) #声明player，使用Conv2D解析RGB
+    if hyper_param["use_duel"]:
+        player = DQN.DQNplayer(networkName="duel",hyper_param = hyper_param)
+    else:
+        player = DQN.DQNplayer(networkName="conv2d",hyper_param = hyper_param) #声明player，使用Conv2D解析RGB
     #player = DQN.DQNplayer(name="Breakout-v0",networkName="duel",max_memory_length = 20000)
     player.main_process() # 进行训练，训练过程中要绘制episode总奖励曲线
     # 选择保存模型
