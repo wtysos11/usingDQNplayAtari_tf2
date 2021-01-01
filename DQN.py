@@ -235,7 +235,7 @@ class DQNplayer:
                     # Double Q优化
                     maxFutureAction = np.argmax(policyNetworkFutureActionval,axis=1)
                     maxActionVal = targetNetworkFutureActionval[np.arange(len(targetNetworkFutureActionval)),maxFutureAction]
-                    q_target = reward_array + (1-done_array)*self.discount_factor * maxActionVal
+                    #q_target = reward_array + (1-done_array)*self.discount_factor * maxActionVal
                     # 对于每一个状态，对Q表进行更新。顺便计算td_errors
                     policyNetworkCurrentActionval[np.arange(len(targetNetworkFutureActionval)),action_array] = maxActionVal
                         
@@ -262,7 +262,7 @@ class DQNplayer:
             logging.warning("reward distribute: max reward {}/ minreward {}".format(max(rewardList),min(rewardList)))
             if self.global_counting > self.learning_starts:
                 #记录episode总奖励
-                logging.warning("mean loss:{}",np.mean(lossList))
+                #logging.warning("mean loss:{}",np.mean(lossList))
                 if episode_num_counter % 500 == 0 and episode_num_counter > 0:
                     self.savemodel(str(episode_num_counter))
         # 训练完毕
