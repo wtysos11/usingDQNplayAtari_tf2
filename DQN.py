@@ -252,6 +252,11 @@ class DQNplayer:
                 
                 # 计数器更新
                 self.global_counting += 1
+                if self.global_counting > self.learning_starts:
+                    #记录episode总奖励
+                    #logging.warning("mean loss:{}",np.mean(lossList))
+                    if self.global_counting % self.hyper_param["backup_record_step"] == 0:
+                        self.savemodel(str(self.global_counting))
             
             episode_num_counter += 1
             episode_total_reward.append(currentEpisodeReward)
@@ -260,11 +265,7 @@ class DQNplayer:
             rewardFileWriter.flush()
             logging.warning("episode {} 's reward {}".format(episode_num_counter,currentEpisodeReward))
             logging.warning("reward distribute: max reward {}/ minreward {}".format(max(rewardList),min(rewardList)))
-            if self.global_counting > self.learning_starts:
-                #记录episode总奖励
-                #logging.warning("mean loss:{}",np.mean(lossList))
-                if episode_num_counter % 500 == 0 and episode_num_counter > 0:
-                    self.savemodel(str(episode_num_counter))
+
         # 训练完毕
         rewardFileWriter.close()
         plt.cla()
@@ -285,7 +286,7 @@ class DQNplayer:
             None
         '''
         eps_timesteps = self.eps_fraction * \
-            float(self.hyper_param["num-steps"])
+            float(self.hyper_param["num-steps"]) #总共跑1百万次，其中前10%用来做探索
         fraction = min(1.0, float(self.global_counting) / eps_timesteps)
         currentEpsilonVal = self.eps_start + fraction * \
             (self.eps_end - self.eps_start)

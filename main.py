@@ -28,7 +28,7 @@ def main():
         "eps-start": 1,  # e-greedy start threshold
         "eps-end": 0.01,  # e-greedy end threshold
         "eps-fraction": 0.1,  # fraction of num-steps
-        "print-freq": 10
+        "backup_record_step": 10000 # frequence of saving network
     }
 
     player = DQN.DQNplayer(networkName="conv2d",hyper_param = hyper_param) #声明player，使用Conv2D解析RGB
