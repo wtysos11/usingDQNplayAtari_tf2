@@ -14,7 +14,7 @@ from collections import deque
 import logging
 import math
 
-from replay_buffer import PrioritizedReplayBuffer,LinearSchedule
+from replay_buffer import ReplayBuffer
 from wrappers import *
 
 class NeuralNetworkBuilder:
@@ -108,34 +108,6 @@ class NeuralNetworkBuilder:
         elif name == "conv2d":
             return self.build_conv2d(n_input,n_output)
 
-
-class MemoryBuffer:
-    '''
-    DQNplayer中的缓存管理系统
-    需要记录元组(s_t,a_t,r,s_{t+1},done)，供之后的训练使用。
-    '''
-    def __init__(self,max_length = 10000):
-        self.memory = deque(maxlen=max_length)
-
-    def getLength(self):
-        return len(self.memory)
-
-    def addItem(self,item):
-        self.memory.append(item)
-
-    def sampleBatch(self,batch_size = 32):
-        '''
-        输入一个batch所需要的数据量，输出这个batch的数据。
-        数据由记忆库乱序输出得到
-        Args:
-            batch_size 一个batch所需要的数据量
-        Returns:
-            data元组 这个batch的数据，是一个np.array的形式，由5个列组成
-        '''
-        order = np.random.permutation(len(self.memory))[:batch_size]
-        data = np.array(self.memory)[order]
-        return data[:,0],data[:,1],data[:,2],data[:,3],data[:,4]
-
 class DQNplayer:
     '''
     然后还有一个函数，能够根据给定的神经网络运行这个游戏，自动进行。
@@ -144,14 +116,16 @@ class DQNplayer:
         Q_main，神经网络，主要训练函数。输入为Atari状态，输出为大小等于动作空间的向量
         Q_target，Q_main的旧有拷贝，负责切断因果性进行最大动作估计。
     '''
-    def __init__(self,name="Pong-v0",networkName="conv2d",max_memory_length = 20000):
+    def __init__(self,hyper_param,networkName="conv2d"):
         '''
         初始化，这里应该声明网络和超参数
         Args:
             name，表示所选择的Atari游戏，要求必须为RGB模式的输入
         '''
         # 声明环境
-        self.env = gym.make(name)
+        self.hyper_param = hyper_param
+
+        self.env = gym.make(hyper_param["env"])
         self.env = NoopResetEnv(self.env, noop_max=30)
         self.env = MaxAndSkipEnv(self.env, skip=4)
         self.env = EpisodicLifeEnv(self.env)
@@ -163,14 +137,14 @@ class DQNplayer:
         self.env = gym.wrappers.Monitor(
         self.env, './video/', video_callable=lambda episode_id: episode_id % 50 == 0, force=True)
 
-        self.gameName = name
+        self.gameName = hyper_param["env"]
         self.networkName = networkName
         # 构建网络
-        self.learning_rate = 1e-4
+        self.learning_rate = hyper_param["learning-rate"]
         Builder = NeuralNetworkBuilder(self.learning_rate)
         network_input = (84,84,4) # 根据skip frame得到的形状
-        self.Q_main = Builder.build_network(network_input,self.env.action_space.n,name = networkName)
-        self.Q_target = Builder.build_network(network_input,self.env.action_space.n,name = networkName)
+        self.policy_network = Builder.build_network(network_input,self.env.action_space.n,name = networkName)
+        self.target_network = Builder.build_network(network_input,self.env.action_space.n,name = networkName)
         # 基础设施
         # 弃用简易buffer，改用priority_buffer(from baseline.dqn)
         # self.memoryBuffer = MemoryBuffer(max_length = max_memory_length)
@@ -179,46 +153,39 @@ class DQNplayer:
         # 第二，与普通的buffer相比，拿变量的时候不是五个值而是七个值，最后会有一个weights和一个batch_idxes
         # 第三，计算完成之后要将td_errors用来更新权重。关键在于td_error怎么计算，按论文上的说法，TD-error = q-target - q-eval
         # new_priorities = abs(td_error) + epsilon(1e-6)，然后调用replay_buffer.update_priorities方法
-        self.buffer_size = max_memory_length
-        self.prioritized_replay_alpha = 0.6 # 用于构建priority_replay部分
-        self.prioritized_replay_beta0 = 0.4 # 用于在sample中充当参数
-        self.prioritized_replay_eps = 1e-6 #用于更新priority
-        self.memoryBuffer = PrioritizedReplayBuffer(self.buffer_size,self.prioritized_replay_alpha)
+        self.buffer_size = hyper_param["replay-buffer-size"]
+        self.memoryBuffer = ReplayBuffer(hyper_param["replay-buffer-size"])
 
-        self.learning_starts = 10000
+        self.learning_starts = hyper_param["learning-starts"]
         # 声明超参数
         # epsilon控制系统
         # epsilon min max decay rate...
-        self.epsilon_min = 0.01
-        self.epsilon_max = 1.0
-        self.epsilon_decay_steps = 100000
+        self.eps_start = hyper_param["eps-start"]
+        self.eps_end = hyper_param["eps-end"]
+        self.eps_fraction = hyper_param["eps-fraction"]
 
         # 学习率
-        self.trajectory_length = 4 # multi-step的轨迹长度, Rainbow原文用了3，我觉得4也差不多。
-        self.discount_factor = 0.99
+        self.discount_factor = hyper_param["discount-factor"]
         # Q_target更新速率
-        self.target_update_rate = 1000
+        self.target_update_rate = hyper_param["target-update-freq"]
 
-    def main_process(self,episode_num = 10000,batch_size = 32):
+    def main_process(self):
         '''
         主过程，详情见上面的部分
         '''
         self.global_counting = 0 #额外超参数，每次训练重置，负责提供各个超参数的衰变
-        step_train = 4 # 每4次行动训练一次神经网络
+        num_steps = self.hyper_param["num-steps"]
+        batch_size = self.hyper_param["batch-size"]
+        step_train = self.hyper_param["learning-freq"]
         rewardFileWriter = open("episodeReward","w")
         
         # 声明规划器
-        self.prioritized_replay_beta_iters = episode_num * 1500
-        self.beta_schedule = LinearSchedule(self.prioritized_replay_beta_iters,
-                                       initial_p=self.prioritized_replay_beta0,
-                                       final_p=1.0)
-
         episode_total_reward = [] # 用于存放每一轮的奖励，并绘制最终曲线
         # exploration
          # 目的是填满缓冲区。我想了一下还是不用多步了，因为计算出来的肯定是错的，所以用不用是没区别的。
          # 最好的方式应该是保留下缓冲区的数据，供之后的训练使用。
-
-        for episode_num_counter in range(episode_num):
+        episode_num_counter = 0
+        while self.global_counting < num_steps:
         #对于每一个episode
             logging.warning("episode num {} start".format(episode_num_counter))
             gameDone = False
@@ -227,113 +194,77 @@ class DQNplayer:
             observation = self.env.reset()
             observation = self.preprocessing(observation)
             # 奖励记录，供multi_step计算使用
-            rewardRecorder = deque(maxlen=self.trajectory_length)
-            observationRecorder = deque(maxlen=self.trajectory_length) #里面存放的是84*84*4的处理后数据，与神经网络的输入数据相同
-            actionRecorder = deque(maxlen=self.trajectory_length)
             
             # 用来维护，保存最新的若干个处理后的帧
             # 每次游戏时应该清空之前存储的状态信息
             rewardList = []
             lossList = []
-            # 预处理，直接填满
-            while len(observationRecorder) < self.trajectory_length:
-                observationRecorder.append(observation)
-            while len(actionRecorder) < self.trajectory_length:
-                actionRecorder.append(self.env.action_space.sample())
             #当游戏没有结束
             while not gameDone:
                 if self.global_counting % 1000 == 0:
-                    print("episode :{}/ frame : {}".format(episode_num_counter,self.global_counting))
+                    logging.info("episode :{}/ frame : {}".format(episode_num_counter,self.global_counting))
                 #拿取当前环境并初始化图像（上一时刻的下一记录即为当前记录）
                 #epsilon-greedy，拿取动作
-                action_val = self.Q_main.predict(np.array([observation])) # 这里需要思考一下，我觉得应该是要上升为数组再开回来
-                action = self.epsilon_greedy(action_val)
+                action_val = self.policy_network.predict(np.array([observation])) # 这里需要思考一下，我觉得应该是要上升为数组再开回来
+                action = self.epsilon_greedy(action_val.ravel())
                 #执行动作,获取新环境
                 next_observation, reward, done, _ = self.env.step(action)
                 gameDone = done
                 currentEpisodeReward += reward # 更新episode奖励
                 rewardList.append(reward)
 
-                # 考虑在此处执行Multi-step。进行全面的更新，以当前为0，压入S_0,a_0,reward_0
-                # multi-step的本质实质上就是用下n步的奖励来代替这一步的奖励，从而更好的完成估计。因此需要维护一个未来的奖励数组
-                observationRecorder.append(observation)
-                actionRecorder.append(action) #状态所对应的动作应该加入
-                rewardRecorder.append(reward) #动作所对应的奖励应该加入
+                self.memoryBuffer.add(observation,action,reward,self.preprocessing(next_observation),float(done))
                 observation = self.preprocessing(next_observation)
                 # reward应当为rewardRecorder的和，作为前面的和式计算。此时的reward为未来的奖励
                 # 具体来说，状态reward_0*gammma^0+reward_1*gammma^1+...+reward_{n-1}*gammma^{n-1}
                 # 然后最后的估计值与gamma^n相乘
-                currentEpsilonVal = max(self.epsilon_min,self.epsilon_max-(self.epsilon_max - self.epsilon_min) * self.global_counting/self.epsilon_decay_steps)
-                for beginPoint in range(len(observationRecorder)):
-                    originReward = 0.
-                    discountRecord = 1
-                    for rewardIndex in range(beginPoint,len(rewardRecorder)):
-                        originReward += rewardRecorder[rewardIndex] * discountRecord
-                        discountRecord *= self.discount_factor
-                    originState = observationRecorder[0]
-                    originAction = actionRecorder[0]
-                    # 如果是第一次，则直接将记忆库填满
-                    while len(self.memoryBuffer) < self.buffer_size:
-                        self.memoryBuffer.add(originState,self.env.action_space.sample(),reward,observation,done,self.trajectory_length-beginPoint)
-                    self.memoryBuffer.add(originState,originAction,reward,observation,done,self.trajectory_length-beginPoint)
+                
                 #如果运行了指定次数且有足够多的训练数据，则开始训练
-                if (self.global_counting > self.learning_starts and self.global_counting % step_train == 0 and \
-                    len(self.memoryBuffer) >= batch_size) or \
-                    gameDone:
+                if self.global_counting > self.learning_starts and self.global_counting % step_train == 0:
                     #self.global_counting > self.buffer_size:
                     #从记忆库拿取数据，转换成数组形式
-                    experience = self.memoryBuffer.sample(batch_size,beta = self.beta_schedule.value(self.global_counting))
-                    (obs_array,action_array,reward_array,next_obs_array,done_array,weights,batch_idxes,trajectory_length_array) = experience
+                    experience = self.memoryBuffer.sample(batch_size)
+                    (obs_array,action_array,reward_array,next_obs_array,done_array) = experience
                     # weights是在duel网络中用来作为选择最佳动作的输入，这里应该是不用的
                     # 进行预处理
-                    obs_array = [x for x in obs_array]
-                    next_obs_array = [x for x in next_obs_array]
-                    current_actionVal = self.Q_main.predict(np.array(next_obs_array))
+                    policyNetworkFutureActionval = self.policy_network.predict(np.array(next_obs_array))
                     # 此处一定要使用Q_target进行计算
-                    next_actionVal = self.Q_target.predict(np.array(next_obs_array)) #得到Q(s')的所有动作的向量
+                    targetNetworkFutureActionval = self.target_network.predict(np.array(next_obs_array)) #得到Q(s')的所有动作的向量
                     # 计算Q表
-                    QTable = self.Q_main.predict(np.array(obs_array))
+                    policyNetworkCurrentActionval = self.policy_network.predict(np.array(obs_array))
+                    # Double Q优化
+                    maxFutureAction = np.argmax(policyNetworkFutureActionval,axis=1)
+                    maxActionVal = targetNetworkFutureActionval[np.arange(len(targetNetworkFutureActionval)),maxFutureAction]
+                    q_target = reward_array + (1-done_array)*self.discount_factor * maxActionVal
                     # 对于每一个状态，对Q表进行更新。顺便计算td_errors
-                    td_errors = np.zeros(batch_size)
-                    for i in range(len(obs_array)):
-                        replay_action = action_array[i]
-                        # Q*(s,a) = r + \gamma * Q'(s',a')
-                        # 此处的思路是这样的，最终要求的损失值是(y-Q(s_t,a_t))^2
-                        # 如果将Q(s_t)的动作a_t部分更换成新的y，其他地方不变
-                        # 在MSE的loss计算模式下，其他地方为0，数组编号为a_t时有(y-Q(s_t,a_t))^2
-                        # Double Q优化处
-                        maxFutureAction = np.argmax(current_actionVal[i],axis=-1)#使用最新的网络来选择动作
-                        maxActionVal = next_actionVal[i][maxFutureAction] #拿到目标网络中的值
-                        # multi_step公式中，此处为self.discount_factor^self.trajectory_length
-                        q_target = reward_array[i] + (1-done_array[i])*math.pow(self.discount_factor,trajectory_length_array[i]) * maxActionVal
-                        # TD_error = abs(q_target - q_eval),abs放在后面计算
-                        td_errors[i] = QTable[i][replay_action] - q_target
-                        # 更新，这样keras中就可以直接计算损失函数
-                        QTable[i][replay_action] = q_target
+                    policyNetworkCurrentActionval[np.arange(len(targetNetworkFutureActionval)),action_array] = maxActionVal
                         
                     #喂给神经网络，使用MSE作为损失函数。进行训练
-                    loss = self.Q_main.train_on_batch(np.array(obs_array),QTable)
+                    loss = self.policy_network.train_on_batch(np.array(obs_array),policyNetworkCurrentActionval)
                     lossList.append(loss)
-                    # priority_buffer 更新权重
-                    new_priorities = np.abs(td_errors) + self.prioritized_replay_eps             
-                    self.memoryBuffer.update_priorities(batch_idxes, new_priorities)
+                    del obs_array
+                    del next_obs_array
                     
                 # 如果又经过了指定的时间
-                if self.global_counting % self.target_update_rate == 0:
+                if self.global_counting > self.learning_starts and self.global_counting % self.target_update_rate == 0:
                     #Q_target更新
-                    self.Q_target.set_weights(self.Q_main.get_weights())
+                    self.target_network.set_weights(self.policy_network.get_weights())
                 
                 # 计数器更新
                 self.global_counting += 1
-            #记录episode总奖励
+            
+            episode_num_counter += 1
             episode_total_reward.append(currentEpisodeReward)
             # 记录在文件中
             rewardFileWriter.write("{}\n".format(currentEpisodeReward))
             rewardFileWriter.flush()
-            logging.warning("episode {} 's reward {}, loss {}".format(episode_num_counter,currentEpisodeReward,np.mean(lossList)))
+            logging.warning("episode {} 's reward {}".format(episode_num_counter,currentEpisodeReward))
             logging.warning("reward distribute: max reward {}/ minreward {}".format(max(rewardList),min(rewardList)))
-            if episode_num_counter % 500 == 0 and episode_num_counter > 0:
-                self.savemodel(str(episode_num_counter))
+            if self.global_counting > self.learning_starts:
+                #记录episode总奖励
+                logging.warning("mean loss:{}",np.mean(lossList))
+                if episode_num_counter % 500 == 0 and episode_num_counter > 0:
+                    self.savemodel(str(episode_num_counter))
         # 训练完毕
         rewardFileWriter.close()
         plt.cla()
@@ -353,8 +284,12 @@ class DQNplayer:
         Raises:
             None
         '''
+        eps_timesteps = self.eps_fraction * \
+            float(self.hyper_param["num-steps"])
+        fraction = min(1.0, float(self.global_counting) / eps_timesteps)
+        currentEpsilonVal = self.eps_start + fraction * \
+            (self.eps_end - self.eps_start)
         randomNum = np.random.rand() # 获取一个0~1的随机数
-        currentEpsilonVal = max(self.epsilon_min,self.epsilon_max-(self.epsilon_max - self.epsilon_min) * self.global_counting/self.epsilon_decay_steps)
         if randomNum < currentEpsilonVal:
             # 返回随机动作
             return np.random.randint(len(actionVal))
@@ -374,8 +309,8 @@ class DQNplayer:
         #    frame_gray = rgb2gray(resized_frame)
         #    return frame_gray
         #else:
-        return np.moveaxis(np.array(observation),0,2)
+        return np.moveaxis(np.array(observation),0,2)/255.
 
     def savemodel(self,name="Q_main"):
-        self.Q_main.save(name)
+        self.policy_network.save(name)
 
