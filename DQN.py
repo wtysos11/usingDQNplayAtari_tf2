@@ -96,6 +96,67 @@ class DQN(nn.Module):
         self.conv_output_size = 3136 #64*7*7
         self.hidden_size = 512
 
+        self.advantage_layer = nn.Sequential(
+            nn.Linear(in_features=self.conv_output_size , out_features=self.hidden_size),
+            nn.ReLU(),
+            nn.Linear(self.hidden_size, action_space.n),
+        )
+
+        # set value layer
+        self.value_layer = nn.Sequential(
+            nn.Linear(in_features=self.conv_output_size , out_features=self.hidden_size),
+            nn.ReLU(),
+            nn.Linear(self.hidden_size, 1),
+        )
+
+    def forward(self, x):
+        x = self.conv(x)
+        conv_out = x.view(x.size()[0],-1)
+        # value stream
+        value = self.value_layer(conv_out)
+        # action stream
+        advantage = self.advantage_layer(conv_out)
+        #advantage.mean(dim=-1,keepdim=True) and advantage.mean(dim=1,keepdim=True)) is the same
+        q = value + advantage - advantage.mean(dim=-1,keepdim=True)
+        return q
+
+
+class NoisyDQN(nn.Module):
+    """
+    DQN Network implementation of paper Human-level control through deep reinforcement learning
+    """
+
+    def __init__(self,
+                 observation_space: spaces.Box,
+                 action_space: spaces.Discrete):
+        """
+        Initialise the DQN
+        Args:
+            observation_space env.observation_space, should be a box.
+            action_space env.action_space, should be Descrete
+        """
+        super().__init__()
+        # 类型检查，防止中间脑子抽了。
+        assert type(
+            observation_space) == spaces.Box, 'observation_space must be of type Box'
+        assert len(
+            observation_space.shape) == 3, 'observation space must have the form (channels,width,height), and this should be 4*84*84'
+        assert type(
+            action_space) == spaces.Discrete, 'action_space must be of type Discrete'
+        
+        # Based on paper "Human-level control through deep reinforcement learning"
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels=observation_space.shape[0], out_channels=32, kernel_size=8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1),
+            nn.ReLU()
+        )
+
+        self.conv_output_size = 3136 #64*7*7
+        self.hidden_size = 512
+
         # 默认值
         self.atoms = 51
         self.noisy_std = 0.1
@@ -166,12 +227,17 @@ class DQNplayer:
         self.learning_rate = hyper_param["learning-rate"]
 
         assert self.env.observation_space.shape == (4,84,84)
-        self.policy_network = DQN(self.env.observation_space,self.env.action_space).to(self.device)
-        self.target_network = DQN(self.env.observation_space,self.env.action_space).to(self.device)
+        if self.hyper_param["use_noisy_network"]:
+            self.policy_network = NoisyDQN(self.env.observation_space,self.env.action_space).to(self.device)
+            self.target_network = NoisyDQN(self.env.observation_space,self.env.action_space).to(self.device)
+        else:
+            self.policy_network = DQN(self.env.observation_space,self.env.action_space).to(self.device)
+            self.target_network = DQN(self.env.observation_space,self.env.action_space).to(self.device)
         self.update_target_network()
         self.target_network.eval()
-        self.policy_network.reset_noise()
-        self.target_network.reset_noise()
+        if self.hyper_param["use_noisy_network"]:
+            self.policy_network.reset_noise()
+            self.target_network.reset_noise()
         self.optimiser = torch.optim.RMSprop(self.policy_network.parameters()
             , lr=self.learning_rate)
         # 基础设施
@@ -205,11 +271,12 @@ class DQNplayer:
         self.target_update_rate = hyper_param["target-update-freq"]
 
         # 记录系统
-        self.n_steps = 4 #multi-step使用4
-        if self.hyper_param["use-prioritybuffer"]:
-            self.nstep_memoryBuffer = PrioritizedReplayBuffer(hyper_param["replay-buffer-size"],self.prioritized_replay_alpha)
-        else:
-            self.nstep_memoryBuffer = ReplayBuffer(hyper_param["replay-buffer-size"])
+        if self.hyper_param["use_multi_step"]:
+            self.n_steps = 4 #multi-step使用4
+            if self.hyper_param["use-prioritybuffer"]:
+                self.nstep_memoryBuffer = PrioritizedReplayBuffer(hyper_param["replay-buffer-size"],self.prioritized_replay_alpha)
+            else:
+                self.nstep_memoryBuffer = ReplayBuffer(hyper_param["replay-buffer-size"])
 
     def main_process(self):
         '''
@@ -246,16 +313,20 @@ class DQNplayer:
             nstepsLossList = []
             # 用来维护，保存最新的若干个处理后的帧
             # multi n_steps
-            rewardRecorder = deque(maxlen=self.n_steps)
-            observationRecorder = deque(maxlen=self.n_steps)
-            actionRecorder = deque(maxlen=self.n_steps)
+            if self.hyper_param["use_multi_step"]:
+                rewardRecorder = deque(maxlen=self.n_steps)
+                observationRecorder = deque(maxlen=self.n_steps)
+                actionRecorder = deque(maxlen=self.n_steps)
 
             #当游戏没有结束
             while not gameDone and self.global_counting < num_steps:
                 assert not gameDone #理论上不应该有gameDone为true的情况
                 
                 #epsilon-greedy，拿取动作
-                action = self.select_action(observation)
+                if self.hyper_param["use_noisy_network"]:
+                    action = self.select_action(observation)
+                else:
+                    action = self.epsilon_greedy(observation)
                 #执行动作,获取新环境
                 next_observation, reward, done, info = self.env.step(action)
                 gameDone = done
@@ -263,18 +334,18 @@ class DQNplayer:
                 rewardList.append(reward)
 
                 self.memoryBuffer.add(observation,action,reward,next_observation,float(done))
-
-                rewardRecorder.append(reward)
-                observationRecorder.append(observation)
-                actionRecorder.append(action)
-                if len(observationRecorder) >= self.n_steps:
-                    # 计算gamma
-                    currentReward = 0
-                    currentGamma = 1
-                    for i in range(len(rewardRecorder)):
-                        currentReward += rewardRecorder[i]*currentGamma
-                        currentGamma *= self.discount_factor
-                    self.nstep_memoryBuffer.add(observationRecorder[0],actionRecorder[0],currentReward,next_observation,float(done))
+                if self.hyper_param["use_multi_step"]:
+                    rewardRecorder.append(reward)
+                    observationRecorder.append(observation)
+                    actionRecorder.append(action)
+                    if len(observationRecorder) >= self.n_steps:
+                        # 计算gamma
+                        currentReward = 0
+                        currentGamma = 1
+                        for i in range(len(rewardRecorder)):
+                            currentReward += rewardRecorder[i]*currentGamma
+                            currentGamma *= self.discount_factor
+                        self.nstep_memoryBuffer.add(observationRecorder[0],actionRecorder[0],currentReward,next_observation,float(done))
 
                 observation = next_observation
                 # reward应当为rewardRecorder的和，作为前面的和式计算。此时的reward为未来的奖励
@@ -289,10 +360,12 @@ class DQNplayer:
                     device = self.device
                     loss = self.update()
                     lossList.append(loss)
-                    loss = self.update(isNsteps=True)
-                    nstepsLossList.append(loss)
-                    self.policy_network.reset_noise()# 这个应该不用
-                    self.target_network.reset_noise()
+                    if self.hyper_param["use_multi_step"]:
+                        loss = self.update(isNsteps=True)
+                        nstepsLossList.append(loss)
+                    if self.hyper_param["use_noisy_network"]:
+                        self.policy_network.reset_noise()# 这个应该不用
+                        self.target_network.reset_noise()
                     
                 # 如果又经过了指定的时间
                 if self.global_counting > self.learning_starts and self.global_counting % self.target_update_rate == 0:
@@ -353,7 +426,42 @@ class DQNplayer:
             q_values = self.policy_network(state)
             _, action = q_values.max(1)
         return action.item()
-    
+
+    def epsilon_greedy(self,state):
+        '''
+            接受神经网络的输出值，返回期望进行的动作。
+            函数会产生一个随机数，如果随机数的值小于epsilon，则返回随机动作；
+                否则，则返回action数组中值最大的动作。
+        Args:
+            actionVal，大小为action_space_n的输出向量，为Q_main的输出向量
+            epsilon，一个0~1的float值。
+        Returns:
+            actionNum，一个0~action_space_n-1的标量，表示执行的动作序号
+        Raises:
+            None
+        '''
+        eps_timesteps = self.eps_fraction * \
+            float(self.hyper_param["num-steps"]) #总共跑1百万次，其中前10%用来做探索
+        fraction = min(1.0, float(self.global_counting) / eps_timesteps)
+        currentEpsilonVal = self.eps_start + fraction * \
+            (self.eps_end - self.eps_start)
+        self.currentEpsilonVal = currentEpsilonVal
+        randomNum = np.random.rand() # 获取一个0~1的随机数
+        if randomNum < currentEpsilonVal:
+            # 返回随机动作
+            self.actionRandomRecorder.append(1)
+            return self.env.action_space.sample()
+        else:
+            # 返回当前最大动作
+            self.actionRandomRecorder.append(0)
+            device = self.device
+            state = np.array(state)/255.
+            state = torch.from_numpy(state).float().unsqueeze(0).to(device)
+            with torch.no_grad():
+                q_values = self.policy_network(state)
+                _, action = q_values.max(1)
+                return action.item()
+
     def update(self,isNsteps = False):
         device = self.device
         batch_size = self.hyper_param["batch-size"]
