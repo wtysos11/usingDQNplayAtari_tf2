@@ -7,7 +7,7 @@ from collections import deque
 import logging
 import math
 
-from replay_buffer import ReplayBuffer
+from replay_buffer import *
 from wrappers import *
 
 from gym import spaces
@@ -109,7 +109,13 @@ class DQNplayer:
         # 第三，计算完成之后要将td_errors用来更新权重。关键在于td_error怎么计算，按论文上的说法，TD-error = q-target - q-eval
         # new_priorities = abs(td_error) + epsilon(1e-6)，然后调用replay_buffer.update_priorities方法
         self.buffer_size = hyper_param["replay-buffer-size"]
-        self.memoryBuffer = ReplayBuffer(hyper_param["replay-buffer-size"])
+        if self.hyper_param["use-prioritybuffer"]:
+            self.prioritized_replay_alpha = hyper_param["prioritized_replay_alpha"] # 用于构建priority_replay部分
+            self.prioritized_replay_beta0 = hyper_param["prioritized_replay_beta0"] # 用于在sample中充当参数
+            self.prioritized_replay_eps = hyper_param["prioritized_replay_eps"] #用于更新priority
+            self.memoryBuffer = PrioritizedReplayBuffer(hyper_param["replay-buffer-size"],self.prioritized_replay_alpha)
+        else:
+            self.memoryBuffer = ReplayBuffer(hyper_param["replay-buffer-size"])
 
         self.learning_starts = hyper_param["learning-starts"]
         # 声明超参数
@@ -136,7 +142,11 @@ class DQNplayer:
         batch_size = self.hyper_param["batch-size"]
         step_train = self.hyper_param["learning-freq"]
         rewardFileWriter = open("episodeReward","w")
-        
+        if self.hyper_param["use-prioritybuffer"]:
+            self.prioritized_replay_beta_iters = num_steps
+            self.beta_schedule = LinearSchedule(self.prioritized_replay_beta_iters,
+                                           initial_p=self.prioritized_replay_beta0,
+                                           final_p=1.0)
         # 声明规划器
         episode_total_reward = [] # 用于存放每一轮的奖励，并绘制最终曲线
         # exploration
@@ -181,9 +191,13 @@ class DQNplayer:
                     #self.global_counting > self.buffer_size:
                     #从记忆库拿取数据，转换成数组形式
                     device = self.device
-                    experience = self.memoryBuffer.sample(batch_size)
-                    (obs_array,action_array,reward_array,next_obs_array,done_array) = experience
-                    # preprocessing
+                    if self.hyper_param["use-prioritybuffer"]:
+                        experience = self.memoryBuffer.sample(batch_size,beta = self.beta_schedule.value(self.global_counting))
+                        (obs_array,action_array,reward_array,next_obs_array,done_array,weights,batch_idxes) = experience
+                    else:
+                        experience = self.memoryBuffer.sample(batch_size)
+                        (obs_array,action_array,reward_array,next_obs_array,done_array) = experience
+                    # preprocessing。其余的工作在wrapper层完成
                     obs_array = np.array(obs_array)/255.
                     next_obs_array = np.array(next_obs_array)/255.
                     # load torch data
@@ -210,6 +224,16 @@ class DQNplayer:
                     del states
                     del next_states
                     lossList.append(loss.item())
+                    if self.hyper_param["use-prioritybuffer"]:
+                        # 更新权重
+                        #weights = torch.FloatTensor(
+                        #        weights.reshape(-1, 1)
+                        #    ).to(device)
+                        #loss = torch.mean(loss*weights)
+                        #loss4priority = loss.detach().cpu().numpy()
+                        td_errors = (q_eval-q_target).detach().cpu().numpy()
+                        new_priorities = np.abs(td_errors) + self.prioritized_replay_eps
+                        self.memoryBuffer.update_priorities(batch_idxes, new_priorities)
                     
                 # 如果又经过了指定的时间
                 if self.global_counting > self.learning_starts and self.global_counting % self.target_update_rate == 0:
