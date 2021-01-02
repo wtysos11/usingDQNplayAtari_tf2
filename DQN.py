@@ -17,8 +17,7 @@ import torch.nn.functional as F
 # Class structure loosely inspired by https://towardsdatascience.com/beating-video-games-with-deep-q-networks-7f73320b9592
 class DQN(nn.Module):
     """
-    A basic implementation of a Deep Q-Network. The architecture is the same as that described in the
-    Nature DQN paper.
+    DQN Network implementation of paper Human-level control through deep reinforcement learning
     """
 
     def __init__(self,
@@ -26,10 +25,12 @@ class DQN(nn.Module):
                  action_space: spaces.Discrete):
         """
         Initialise the DQN
-        :param observation_space: the state space of the environment
-        :param action_space: the action space of the environment
+        Args:
+            observation_space env.observation_space, should be a box.
+            action_space env.action_space, should be Descrete
         """
         super().__init__()
+        # 类型检查，防止中间脑子抽了。
         assert type(
             observation_space) == spaces.Box, 'observation_space must be of type Box'
         assert len(
@@ -193,6 +194,7 @@ class DQNplayer:
                     dones = torch.from_numpy(done_array).float().to(device)
                     # 计算最大值
                     with torch.no_grad():
+                        # Double DQN
                         _, policyNetworkFutureAction = self.policy_network(next_states).max(1) #max接受参数为计算的轴；第一个是最大的值，第二个是表情
                         targetNetworkFutureActionval = self.target_network(next_states).gather(1, policyNetworkFutureAction.unsqueeze(1)).squeeze() #沿1轴检索，并展开
                         q_target = rewards + (1 - dones) * self.discount_factor * targetNetworkFutureActionval
