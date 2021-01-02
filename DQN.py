@@ -269,7 +269,8 @@ class DQNplayer:
         self.discount_factor = hyper_param["discount-factor"]
         # Q_target更新速率
         self.target_update_rate = hyper_param["target-update-freq"]
-
+        # 记录系统
+        self.actionRandomRecorder = deque(maxlen = 10000)
         # 记录系统
         if self.hyper_param["use_multi_step"]:
             self.n_steps = 4 #multi-step使用4
@@ -389,7 +390,8 @@ class DQNplayer:
             #logging.warning("reward distribute: max reward {}/ minreward {}".format(max(rewardList),min(rewardList)))
             if len(lossList) > 0:
                 logging.warning("mean of loss is {}".format(np.mean(lossList)))
-                logging.warning("mean of n_step loss is {}".format(np.mean(nstepsLossList)))
+                if self.hyper_param["use_multi_step"]:
+                    logging.warning("mean of n_step loss is {}".format(np.mean(nstepsLossList)))
             else:
                 logging.warning("Still not start")
 
