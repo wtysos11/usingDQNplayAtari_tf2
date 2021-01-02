@@ -12,8 +12,8 @@ def main():
 
     hyper_param = {
         "seed": 42,  # which seed to use
-        "env": "PongNoFrameskip-v4",  # name of the game
-        "replay-buffer-size": int(5e3),  # replay buffer size
+        "env": "BreakoutNoFrameskip-v4",  # name of the game
+        "replay-buffer-size": int(5e4),  # replay buffer size
         "learning-rate": 1e-4,  # learning rate for Adam optimizer
         "discount-factor": 0.99,  # discount factor
         "num-steps": int(1e6),# total number of steps to run the environment for

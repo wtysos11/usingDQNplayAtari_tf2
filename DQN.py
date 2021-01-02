@@ -205,7 +205,11 @@ class DQNplayer:
         self.target_update_rate = hyper_param["target-update-freq"]
 
         # 记录系统
-        self.actionRandomRecorder = deque(maxlen = 10000)
+        self.n_steps = 4 #multi-step使用4
+        if self.hyper_param["use-prioritybuffer"]:
+            self.nstep_memoryBuffer = PrioritizedReplayBuffer(hyper_param["replay-buffer-size"],self.prioritized_replay_alpha)
+        else:
+            self.nstep_memoryBuffer = ReplayBuffer(hyper_param["replay-buffer-size"])
 
     def main_process(self):
         '''
@@ -239,8 +243,12 @@ class DQNplayer:
             # 奖励记录，供multi_step计算使用
             rewardList = []
             lossList = []       
+            nstepsLossList = []
             # 用来维护，保存最新的若干个处理后的帧
-            # 每次游戏时应该清空之前存储的状态信息
+            # multi n_steps
+            rewardRecorder = deque(maxlen=self.n_steps)
+            observationRecorder = deque(maxlen=self.n_steps)
+            actionRecorder = deque(maxlen=self.n_steps)
 
             #当游戏没有结束
             while not gameDone and self.global_counting < num_steps:
@@ -255,6 +263,19 @@ class DQNplayer:
                 rewardList.append(reward)
 
                 self.memoryBuffer.add(observation,action,reward,next_observation,float(done))
+
+                rewardRecorder.append(reward)
+                observationRecorder.append(observation)
+                actionRecorder.append(action)
+                if len(observationRecorder) >= self.n_steps:
+                    # 计算gamma
+                    currentReward = 0
+                    currentGamma = 1
+                    for i in range(len(rewardRecorder)):
+                        currentReward += rewardRecorder[i]*currentGamma
+                        currentGamma *= self.discount_factor
+                    self.nstep_memoryBuffer.add(observationRecorder[0],actionRecorder[0],currentReward,next_observation,float(done))
+
                 observation = next_observation
                 # reward应当为rewardRecorder的和，作为前面的和式计算。此时的reward为未来的奖励
                 # 具体来说，状态reward_0*gammma^0+reward_1*gammma^1+...+reward_{n-1}*gammma^{n-1}
@@ -266,51 +287,11 @@ class DQNplayer:
                     #self.global_counting > self.buffer_size:
                     #从记忆库拿取数据，转换成数组形式
                     device = self.device
-                    if self.hyper_param["use-prioritybuffer"]:
-                        experience = self.memoryBuffer.sample(batch_size,beta = self.beta_schedule.value(self.global_counting))
-                        (obs_array,action_array,reward_array,next_obs_array,done_array,weights,batch_idxes) = experience
-                    else:
-                        experience = self.memoryBuffer.sample(batch_size)
-                        (obs_array,action_array,reward_array,next_obs_array,done_array) = experience
-                    # preprocessing。其余的工作在wrapper层完成
-                    obs_array = np.array(obs_array)/255.
-                    next_obs_array = np.array(next_obs_array)/255.
-                    # load torch data
-                    states = torch.from_numpy(obs_array).float().to(device)
-                    actions = torch.from_numpy(action_array).long().to(device)
-                    rewards = torch.from_numpy(reward_array).float().to(device)
-                    next_states = torch.from_numpy(next_obs_array).float().to(device)
-                    dones = torch.from_numpy(done_array).float().to(device)
-                    # 计算最大值
-                    with torch.no_grad():
-                        # Double DQN
-                        _, policyNetworkFutureAction = self.policy_network(next_states).max(1) #max接受参数为计算的轴；第一个是最大的值，第二个是表情
-                        targetNetworkFutureActionval = self.target_network(next_states).gather(1, policyNetworkFutureAction.unsqueeze(1)).squeeze() #沿1轴检索，并展开
-                        q_target = rewards + (1 - dones) * self.discount_factor * targetNetworkFutureActionval
-                    q_eval = self.policy_network(states)
-                    q_eval = q_eval.gather(1, actions.unsqueeze(1)).squeeze()#拿到原动作对应的q_eval
-                    # Huber
-                    loss = F.smooth_l1_loss(q_eval, q_target)
-                    # 常规操作
-                    self.optimiser.zero_grad()
-                    loss.backward()
-                    self.optimiser.step()
-                    # 清空，减少爆内存可能性
-                    del states
-                    del next_states
-                    lossList.append(loss.item())
-                    if self.hyper_param["use-prioritybuffer"]:
-                        # 更新权重
-                        #weights = torch.FloatTensor(
-                        #        weights.reshape(-1, 1)
-                        #    ).to(device)
-                        #loss = torch.mean(loss*weights)
-                        #loss4priority = loss.detach().cpu().numpy()
-                        td_errors = (q_eval-q_target).detach().cpu().numpy()
-                        new_priorities = np.abs(td_errors) + self.prioritized_replay_eps
-                        self.memoryBuffer.update_priorities(batch_idxes, new_priorities)
-                    # reset-noise
-                    self.policy_network.reset_noise()
+                    loss = self.update()
+                    lossList.append(loss)
+                    loss = self.update(isNsteps=True)
+                    nstepsLossList.append(loss)
+                    self.policy_network.reset_noise()# 这个应该不用
                     self.target_network.reset_noise()
                     
                 # 如果又经过了指定的时间
@@ -335,6 +316,7 @@ class DQNplayer:
             #logging.warning("reward distribute: max reward {}/ minreward {}".format(max(rewardList),min(rewardList)))
             if len(lossList) > 0:
                 logging.warning("mean of loss is {}".format(np.mean(lossList)))
+                logging.warning("mean of n_step loss is {}".format(np.mean(nstepsLossList)))
             else:
                 logging.warning("Still not start")
 
@@ -372,6 +354,62 @@ class DQNplayer:
             _, action = q_values.max(1)
         return action.item()
     
+    def update(self,isNsteps = False):
+        device = self.device
+        batch_size = self.hyper_param["batch-size"]
+        if isNsteps:
+            buffer = self.nstep_memoryBuffer
+        else:
+            buffer = self.memoryBuffer
+        if self.hyper_param["use-prioritybuffer"]:
+            experience = buffer.sample(batch_size,beta = self.beta_schedule.value(self.global_counting))
+            (obs_array,action_array,reward_array,next_obs_array,done_array,weights,batch_idxes) = experience
+        else:
+            experience = buffer.sample(batch_size)
+            (obs_array,action_array,reward_array,next_obs_array,done_array) = experience
+        # preprocessing。其余的工作在wrapper层完成
+        obs_array = np.array(obs_array)/255.
+        next_obs_array = np.array(next_obs_array)/255.
+        # load torch data
+        states = torch.from_numpy(obs_array).float().to(device)
+        actions = torch.from_numpy(action_array).long().to(device)
+        rewards = torch.from_numpy(reward_array).float().to(device)
+        next_states = torch.from_numpy(next_obs_array).float().to(device)
+        dones = torch.from_numpy(done_array).float().to(device)
+        # 计算最大值
+        with torch.no_grad():
+            # Double DQN
+            _, policyNetworkFutureAction = self.policy_network(next_states).max(1) #max接受参数为计算的轴；第一个是最大的值，第二个是表情
+            targetNetworkFutureActionval = self.target_network(next_states).gather(1, policyNetworkFutureAction.unsqueeze(1)).squeeze() #沿1轴检索，并展开
+            if isNsteps:
+                q_target = rewards + (1 - dones) * math.pow(self.discount_factor,self.n_steps) * targetNetworkFutureActionval
+            else:
+                q_target = rewards + (1 - dones) * self.discount_factor * targetNetworkFutureActionval
+        q_eval = self.policy_network(states)
+        q_eval = q_eval.gather(1, actions.unsqueeze(1)).squeeze()#拿到原动作对应的q_eval
+        # Huber
+        loss = F.smooth_l1_loss(q_eval, q_target)
+        # 常规操作
+        self.optimiser.zero_grad()
+        loss.backward()
+        self.optimiser.step()
+        # 清空，减少爆内存可能性
+        del states
+        del next_states
+        
+        if self.hyper_param["use-prioritybuffer"]:
+            # 更新权重
+            #weights = torch.FloatTensor(
+            #        weights.reshape(-1, 1)
+            #    ).to(device)
+            #loss = torch.mean(loss*weights)
+            #loss4priority = loss.detach().cpu().numpy()
+            td_errors = (q_eval-q_target).detach().cpu().numpy()
+            new_priorities = np.abs(td_errors) + self.prioritized_replay_eps
+            buffer.update_priorities(batch_idxes, new_priorities)
+
+        return loss.item()
+
     def update_target_network(self):
         self.target_network.load_state_dict(self.policy_network.state_dict())
 
