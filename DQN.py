@@ -1,5 +1,10 @@
-import torch
+
 import gym
+from gym import spaces
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -10,9 +15,49 @@ import math
 from replay_buffer import *
 from wrappers import *
 
-from gym import spaces
-import torch.nn as nn
-import torch.nn.functional as F
+
+
+class NoisyLinear(nn.Module):
+    '''
+    实现参考了rainbow
+    # https://github.com/Kaixhin/Rainbow/blob/master/model.py
+    '''
+    def __init__(self, in_features, out_features, std_init=0.5):
+        super(NoisyLinear, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.std_init = std_init
+        self.weight_mu = nn.Parameter(torch.empty(out_features, in_features))
+        self.weight_sigma = nn.Parameter(torch.empty(out_features, in_features))
+        self.register_buffer('weight_epsilon', torch.empty(out_features, in_features))
+        self.bias_mu = nn.Parameter(torch.empty(out_features))
+        self.bias_sigma = nn.Parameter(torch.empty(out_features))
+        self.register_buffer('bias_epsilon', torch.empty(out_features))
+        self.reset_parameters()
+        self.reset_noise()
+
+    def reset_parameters(self):
+        mu_range = 1 / math.sqrt(self.in_features)
+        self.weight_mu.data.uniform_(-mu_range, mu_range)
+        self.weight_sigma.data.fill_(self.std_init / math.sqrt(self.in_features))
+        self.bias_mu.data.uniform_(-mu_range, mu_range)
+        self.bias_sigma.data.fill_(self.std_init / math.sqrt(self.out_features))
+
+    def _scale_noise(self, size):
+        x = torch.randn(size, device=self.weight_mu.device)
+        return x.sign().mul_(x.abs().sqrt_())
+
+    def reset_noise(self):
+        epsilon_in = self._scale_noise(self.in_features)
+        epsilon_out = self._scale_noise(self.out_features)
+        self.weight_epsilon.copy_(epsilon_out.ger(epsilon_in))
+        self.bias_epsilon.copy_(epsilon_out)
+
+    def forward(self, input):
+        if self.training:
+          return F.linear(input, self.weight_mu + self.weight_sigma * self.weight_epsilon, self.bias_mu + self.bias_sigma * self.bias_epsilon)
+        else:
+          return F.linear(input, self.weight_mu, self.bias_mu)
 
 # Class structure loosely inspired by https://towardsdatascience.com/beating-video-games-with-deep-q-networks-7f73320b9592
 class DQN(nn.Module):
@@ -48,15 +93,31 @@ class DQN(nn.Module):
             nn.ReLU()
         )
 
-        self.fc = nn.Sequential(
-            nn.Linear(in_features=64*7*7 , out_features=512),
+        self.conv_output_size = 3136 #64*7*7
+        self.hidden_size = 512
+
+        self.advantage_layer = nn.Sequential(
+            nn.Linear(in_features=self.conv_output_size , out_features=self.hidden_size),
             nn.ReLU(),
-            nn.Linear(in_features=512, out_features=action_space.n)
+            nn.Linear(self.hidden_size, action_space.n),
+        )
+
+        # set value layer
+        self.value_layer = nn.Sequential(
+            nn.Linear(in_features=self.conv_output_size , out_features=self.hidden_size),
+            nn.ReLU(),
+            nn.Linear(self.hidden_size, action_space.n),
         )
 
     def forward(self, x):
-        conv_out = self.conv(x).view(x.size()[0],-1)
-        return self.fc(conv_out)
+        x = self.conv(x)
+        conv_out = x.view(x.size()[0],-1)
+        # value stream
+        value = self.value_layer(conv_out)
+        advantage = self.advantage_layer(conv_out)
+        q = value + advantage - advantage.mean(dim=-1,keepdim=True)
+        # action stream
+        return q
 
 class DQNplayer:
     '''
