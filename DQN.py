@@ -96,28 +96,39 @@ class DQN(nn.Module):
         self.conv_output_size = 3136 #64*7*7
         self.hidden_size = 512
 
-        self.advantage_layer = nn.Sequential(
-            nn.Linear(in_features=self.conv_output_size , out_features=self.hidden_size),
-            nn.ReLU(),
-            nn.Linear(self.hidden_size, action_space.n),
-        )
+        # 默认值
+        self.atoms = 51
+        self.noisy_std = 0.1
 
-        # set value layer
-        self.value_layer = nn.Sequential(
-            nn.Linear(in_features=self.conv_output_size , out_features=self.hidden_size),
-            nn.ReLU(),
-            nn.Linear(self.hidden_size, action_space.n),
-        )
+        # value hidden layer
+        self.fc_hidden_v = NoisyLinear(self.conv_output_size, self.hidden_size, std_init=self.noisy_std)
+        #self.fc_output_v = NoisyLinear(self.hidden_size, self.atoms, std_init=self.noisy_std)
+        self.fc_output_v = NoisyLinear(self.hidden_size, 1, std_init=self.noisy_std)
+        # advantage hidden layer
+        self.fc_hidden_a = NoisyLinear(self.conv_output_size, self.hidden_size, std_init=self.noisy_std)
+        #self.fc_output_a = NoisyLinear(self.hidden_size, action_space.n*self.atoms, std_init=self.noisy_std)
+        self.fc_output_a = NoisyLinear(self.hidden_size, action_space.n, std_init=self.noisy_std)
+
 
     def forward(self, x):
         x = self.conv(x)
         conv_out = x.view(x.size()[0],-1)
         # value stream
-        value = self.value_layer(conv_out)
-        advantage = self.advantage_layer(conv_out)
-        q = value + advantage - advantage.mean(dim=-1,keepdim=True)
+        value = self.fc_output_v(F.relu(self.fc_hidden_v(conv_out)))
         # action stream
+        advantage = self.fc_output_a(F.relu(self.fc_hidden_a(conv_out)))
+        #advantage.mean(dim=-1,keepdim=True) and advantage.mean(dim=1,keepdim=True)) is the same
+        q = value + advantage - advantage.mean(dim=-1,keepdim=True)
         return q
+
+    def reset_noise(self):
+        '''
+        reset all noise of noise_linear layer
+        '''
+        self.fc_hidden_v.reset_noise()
+        self.fc_output_v.reset_noise()
+        self.fc_hidden_a.reset_noise()
+        self.fc_output_a.reset_noise()
 
 class DQNplayer:
     '''
@@ -159,6 +170,8 @@ class DQNplayer:
         self.target_network = DQN(self.env.observation_space,self.env.action_space).to(self.device)
         self.update_target_network()
         self.target_network.eval()
+        self.policy_network.reset_noise()
+        self.target_network.reset_noise()
         self.optimiser = torch.optim.RMSprop(self.policy_network.parameters()
             , lr=self.learning_rate)
         # 基础设施
@@ -234,7 +247,7 @@ class DQNplayer:
                 assert not gameDone #理论上不应该有gameDone为true的情况
                 
                 #epsilon-greedy，拿取动作
-                action = self.epsilon_greedy(observation)
+                action = self.select_action(observation)
                 #执行动作,获取新环境
                 next_observation, reward, done, info = self.env.step(action)
                 gameDone = done
@@ -248,6 +261,7 @@ class DQNplayer:
                 # 然后最后的估计值与gamma^n相乘
                 
                 #如果运行了指定次数且有足够多的训练数据，则开始训练
+                # update network here
                 if self.global_counting > self.learning_starts and self.global_counting % step_train == 0:
                     #self.global_counting > self.buffer_size:
                     #从记忆库拿取数据，转换成数组形式
@@ -295,6 +309,9 @@ class DQNplayer:
                         td_errors = (q_eval-q_target).detach().cpu().numpy()
                         new_priorities = np.abs(td_errors) + self.prioritized_replay_eps
                         self.memoryBuffer.update_priorities(batch_idxes, new_priorities)
+                    # reset-noise
+                    self.policy_network.reset_noise()
+                    self.target_network.reset_noise()
                     
                 # 如果又经过了指定的时间
                 if self.global_counting > self.learning_starts and self.global_counting % self.target_update_rate == 0:
@@ -324,8 +341,6 @@ class DQNplayer:
             # 输出平均值
             if len(episode_total_reward)>0:
                 logging.warning("avg reward of 10 episode {}".format(np.mean(episode_total_reward[-10:])))
-                logging.warning("avg random action times for 1w frame {}:".format(np.mean(self.actionRandomRecorder)))
-                logging.warning("Current Epsilon val : {}".format(self.currentEpsilonVal))
 
             if episode_num_counter % self.hyper_param["print-freq"] == 0:
                 self.savemodel()
@@ -336,7 +351,7 @@ class DQNplayer:
         plt.plot(episode_total_reward)
         plt.show()
 
-    def epsilon_greedy(self,state):
+    def select_action(self,state):
         '''
             接受神经网络的输出值，返回期望进行的动作。
             函数会产生一个随机数，如果随机数的值小于epsilon，则返回随机动作；
@@ -349,27 +364,13 @@ class DQNplayer:
         Raises:
             None
         '''
-        eps_timesteps = self.eps_fraction * \
-            float(self.hyper_param["num-steps"]) #总共跑1百万次，其中前10%用来做探索
-        fraction = min(1.0, float(self.global_counting) / eps_timesteps)
-        currentEpsilonVal = self.eps_start + fraction * \
-            (self.eps_end - self.eps_start)
-        self.currentEpsilonVal = currentEpsilonVal
-        randomNum = np.random.rand() # 获取一个0~1的随机数
-        if randomNum < currentEpsilonVal:
-            # 返回随机动作
-            self.actionRandomRecorder.append(1)
-            return self.env.action_space.sample()
-        else:
-            # 返回当前最大动作
-            self.actionRandomRecorder.append(0)
-            device = self.device
-            state = np.array(state)/255.
-            state = torch.from_numpy(state).float().unsqueeze(0).to(device)
-            with torch.no_grad():
-                q_values = self.policy_network(state)
-                _, action = q_values.max(1)
-                return action.item()
+        device = self.device
+        state = np.array(state)/255.
+        state = torch.from_numpy(state).float().unsqueeze(0).to(device)
+        with torch.no_grad():
+            q_values = self.policy_network(state)
+            _, action = q_values.max(1)
+        return action.item()
     
     def update_target_network(self):
         self.target_network.load_state_dict(self.policy_network.state_dict())
