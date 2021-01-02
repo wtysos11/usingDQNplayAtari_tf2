@@ -1,12 +1,5 @@
-import tensorflow.keras as keras
-import tensorflow.keras.backend as K
-from tensorflow.keras.layers import Input,Flatten,Dense,Conv2D,LeakyReLU,Multiply,Lambda
-from tensorflow.keras.models import Model
-from tensorflow.keras.optimizers import Adam,RMSprop
+import torch
 import gym
-
-import cv2
-from skimage.color import rgb2gray
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -17,96 +10,52 @@ import math
 from replay_buffer import ReplayBuffer
 from wrappers import *
 
-class NeuralNetworkBuilder:
-    '''
-        负责构建Q神经网络
-    '''
-    def __init__(self,learning_rate = 0.0001):
-        '''
-            初始化
-        '''
-        self.learning_rate = learning_rate
-    
-    def build_duel(self,n_input,n_output):
-        '''
-        Args:
-            n_input 输入数据的维数，这里应该是图像的大小
-            n_output 输出数据的维数，这里应该是动作空间的大小
-        Returns:
-            model 返回一个Keras类型的model
-        Reference:
-            参考了https://github.com/keras-rl/keras-rl 的网络架构
-        '''
-        # Game-specific 游戏特化代码，如果后续要做泛化的话需要修改此处
-        def lambda_out_shape(input_shape): # lambda层使用的计算后续shape的函数
-            shape = list(input_shape)
-            shape[-1] = 1
-            return tuple(shape)
-        # 第一层应该是一个图像预处理层。使用Pong-v0时的输入为210*160*3
-        model_input = Input(shape=n_input)
-        action_one_hot = Input(shape=(n_output,))# 这里默认n_output为动作空间大小
-        # 初始化完毕后是三层Conv2D+BN(可能可以不加？先不加看一下效果)
-        conv1 = Conv2D(32,(8,8),strides=(4,4),activation='relu')(model_input)
-        conv2 = Conv2D(64,(4,4),strides=(2,2),activation='relu')(conv1)
-        conv3 = Conv2D(64,(3,3),strides=(1,1),activation='relu')(conv2)
-        # 再之后是两层全连接层，确保最后的输出向量维数为action_space的大小
-        flatten = Flatten()(conv3)
-        # Dueling DQN
-        fc1 = Dense(512)(flatten)
-        leakyrelu = LeakyReLU()(fc1)
-        advantage = Dense(n_output)(leakyrelu)
-        # V(s)
-        fc2 = Dense(512)(flatten)
-        value = Dense(1)(fc2)
-        # 最终的值Q=V+A
-        # 或者说，Q = A-mean(A) + V
-        policy = Lambda(lambda x: x[0] - K.mean(x[0]) + x[1])([advantage, value])
+from gym import spaces
+import torch.nn as nn
+import torch.nn.functional as F
 
-        # 声明模型，并返回它
-        model = Model(inputs=[model_input], outputs=[policy])
-        model.compile(loss=keras.losses.Huber(),optimizer=Adam(self.learning_rate))
-        return model
+# Class structure loosely inspired by https://towardsdatascience.com/beating-video-games-with-deep-q-networks-7f73320b9592
+class DQN(nn.Module):
+    """
+    A basic implementation of a Deep Q-Network. The architecture is the same as that described in the
+    Nature DQN paper.
+    """
 
-    def build_conv2d(self,n_input,n_output):
-        '''
-        Args:
-            n_input 输入数据的维数，这里应该是图像的大小
-            n_output 输出数据的维数，这里应该是动作空间的大小
-        Returns:
-            model 返回一个Keras类型的model
-        Reference:
-            参考了https://github.com/keras-rl/keras-rl 的网络架构
-        '''
-        # Game-specific 游戏特化代码，如果后续要做泛化的话需要修改此处
-        model_input = Input(shape=n_input)
-        # 初始化完毕后是三层Conv2D+BN(可能可以不加？先不加看一下效果)
-        conv1 = Conv2D(32,(8,8),strides=(4,4),activation='relu')(model_input)
-        conv2 = Conv2D(64,(4,4),strides=(2,2),activation='relu')(conv1)
-        conv3 = Conv2D(64,(3,3),strides=(1,1),activation='relu')(conv2)
-        # 再之后是两层全连接层，确保最后的输出向量维数为action_space的大小
-        flatten = Flatten()(conv3)
-        fc1 = Dense(512)(flatten)
-        model_output = Dense(n_output)(fc1)
+    def __init__(self,
+                 observation_space: spaces.Box,
+                 action_space: spaces.Discrete):
+        """
+        Initialise the DQN
+        :param observation_space: the state space of the environment
+        :param action_space: the action space of the environment
+        """
+        super().__init__()
+        assert type(
+            observation_space) == spaces.Box, 'observation_space must be of type Box'
+        assert len(
+            observation_space.shape) == 3, 'observation space must have the form (channels,width,height), and this should be 4*84*84'
+        assert type(
+            action_space) == spaces.Discrete, 'action_space must be of type Discrete'
+        
+        # Based on paper "Human-level control through deep reinforcement learning"
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels=observation_space.shape[0], out_channels=32, kernel_size=8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1),
+            nn.ReLU()
+        )
 
-        # 声明模型，并返回它
-        model = Model(inputs=[model_input], outputs=[model_output])
-        model.compile(loss=keras.losses.Huber(),optimizer=RMSprop(self.learning_rate))
-        return model
+        self.fc = nn.Sequential(
+            nn.Linear(in_features=64*7*7 , out_features=512),
+            nn.ReLU(),
+            nn.Linear(in_features=512, out_features=action_space.n)
+        )
 
-    def build_network(self,n_input,n_output,name="conv2d"):
-        '''
-            使用默认值构建神经网络
-        Args:
-            name 表示生成的神经网络类型
-            n_input 输入数据的维数，这里应该是图像的大小
-            n_output 输出数据的维数，这里应该是动作空间的大小
-        Returns:
-            model 返回一个Keras类型的model
-        '''
-        if name=="duel":
-            return self.build_duel(n_input,n_output)
-        elif name == "conv2d":
-            return self.build_conv2d(n_input,n_output)
+    def forward(self, x):
+        conv_out = self.conv(x).view(x.size()[0],-1)
+        return self.fc(conv_out)
 
 class DQNplayer:
     '''
@@ -139,12 +88,17 @@ class DQNplayer:
 
         self.gameName = hyper_param["env"]
         self.networkName = networkName
+        self.device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # 构建网络
         self.learning_rate = hyper_param["learning-rate"]
-        Builder = NeuralNetworkBuilder(self.learning_rate)
-        network_input = (84,84,4) # 根据skip frame得到的形状
-        self.policy_network = Builder.build_network(network_input,self.env.action_space.n,name = networkName)
-        self.target_network = Builder.build_network(network_input,self.env.action_space.n,name = networkName)
+
+        assert self.env.observation_space.shape == (4,84,84)
+        self.policy_network = DQN(self.env.observation_space,self.env.action_space).to(self.device)
+        self.target_network = DQN(self.env.observation_space,self.env.action_space).to(self.device)
+        self.update_target_network()
+        self.target_network.eval()
+        self.optimiser = torch.optim.RMSprop(self.policy_network.parameters()
+            , lr=self.learning_rate)
         # 基础设施
         # 弃用简易buffer，改用priority_buffer(from baseline.dqn)
         # self.memoryBuffer = MemoryBuffer(max_length = max_memory_length)
@@ -169,6 +123,9 @@ class DQNplayer:
         # Q_target更新速率
         self.target_update_rate = hyper_param["target-update-freq"]
 
+        # 记录系统
+        self.actionRandomRecorder = deque(maxlen = 10000)
+
     def main_process(self):
         '''
         主过程，详情见上面的部分
@@ -185,36 +142,35 @@ class DQNplayer:
          # 目的是填满缓冲区。我想了一下还是不用多步了，因为计算出来的肯定是错的，所以用不用是没区别的。
          # 最好的方式应该是保留下缓冲区的数据，供之后的训练使用。
         episode_num_counter = 0
+
         while self.global_counting < num_steps:
         #对于每一个episode
             logging.warning("episode num {} start".format(episode_num_counter))
-            gameDone = False
+            
             currentEpisodeReward = 0
             #初始化环境，主要是运行obs = env.reset()
             observation = self.env.reset()
-            observation = self.preprocessing(observation)
+            gameDone = False
             # 奖励记录，供multi_step计算使用
-            
+            rewardList = []
+            lossList = []       
             # 用来维护，保存最新的若干个处理后的帧
             # 每次游戏时应该清空之前存储的状态信息
-            rewardList = []
-            lossList = []
+
             #当游戏没有结束
-            while not gameDone:
-                if self.global_counting % 1000 == 0:
-                    logging.info("episode :{}/ frame : {}".format(episode_num_counter,self.global_counting))
-                #拿取当前环境并初始化图像（上一时刻的下一记录即为当前记录）
+            while not gameDone and self.global_counting < num_steps:
+                assert not gameDone #理论上不应该有gameDone为true的情况
+                
                 #epsilon-greedy，拿取动作
-                action_val = self.policy_network.predict(np.array([observation])) # 这里需要思考一下，我觉得应该是要上升为数组再开回来
-                action = self.epsilon_greedy(action_val.ravel())
+                action = self.epsilon_greedy(observation)
                 #执行动作,获取新环境
-                next_observation, reward, done, _ = self.env.step(action)
+                next_observation, reward, done, info = self.env.step(action)
                 gameDone = done
                 currentEpisodeReward += reward # 更新episode奖励
                 rewardList.append(reward)
 
-                self.memoryBuffer.add(observation,action,reward,self.preprocessing(next_observation),float(done))
-                observation = self.preprocessing(next_observation)
+                self.memoryBuffer.add(observation,action,reward,next_observation,float(done))
+                observation = next_observation
                 # reward应当为rewardRecorder的和，作为前面的和式计算。此时的reward为未来的奖励
                 # 具体来说，状态reward_0*gammma^0+reward_1*gammma^1+...+reward_{n-1}*gammma^{n-1}
                 # 然后最后的估计值与gamma^n相乘
@@ -223,32 +179,40 @@ class DQNplayer:
                 if self.global_counting > self.learning_starts and self.global_counting % step_train == 0:
                     #self.global_counting > self.buffer_size:
                     #从记忆库拿取数据，转换成数组形式
+                    device = self.device
                     experience = self.memoryBuffer.sample(batch_size)
                     (obs_array,action_array,reward_array,next_obs_array,done_array) = experience
-                    # weights是在duel网络中用来作为选择最佳动作的输入，这里应该是不用的
-                    # 进行预处理
-                    policyNetworkFutureActionval = self.policy_network.predict(np.array(next_obs_array))
-                    # 此处一定要使用Q_target进行计算
-                    targetNetworkFutureActionval = self.target_network.predict(np.array(next_obs_array)) #得到Q(s')的所有动作的向量
-                    # 计算Q表
-                    policyNetworkCurrentActionval = self.policy_network.predict(np.array(obs_array))
-                    # Double Q优化
-                    maxFutureAction = np.argmax(policyNetworkFutureActionval,axis=1)
-                    maxActionVal = targetNetworkFutureActionval[np.arange(len(targetNetworkFutureActionval)),maxFutureAction]
-                    #q_target = reward_array + (1-done_array)*self.discount_factor * maxActionVal
-                    # 对于每一个状态，对Q表进行更新。顺便计算td_errors
-                    policyNetworkCurrentActionval[np.arange(len(targetNetworkFutureActionval)),action_array] = maxActionVal
-                        
-                    #喂给神经网络，使用MSE作为损失函数。进行训练
-                    loss = self.policy_network.train_on_batch(np.array(obs_array),policyNetworkCurrentActionval)
-                    lossList.append(loss)
-                    del obs_array
-                    del next_obs_array
+                    # preprocessing
+                    obs_array = np.array(obs_array)/255.
+                    next_obs_array = np.array(next_obs_array)/255.
+                    # load torch data
+                    states = torch.from_numpy(obs_array).float().to(device)
+                    actions = torch.from_numpy(action_array).long().to(device)
+                    rewards = torch.from_numpy(reward_array).float().to(device)
+                    next_states = torch.from_numpy(next_obs_array).float().to(device)
+                    dones = torch.from_numpy(done_array).float().to(device)
+                    # 计算最大值
+                    with torch.no_grad():
+                        _, policyNetworkFutureAction = self.policy_network(next_states).max(1) #max接受参数为计算的轴；第一个是最大的值，第二个是表情
+                        targetNetworkFutureActionval = self.target_network(next_states).gather(1, policyNetworkFutureAction.unsqueeze(1)).squeeze() #沿1轴检索，并展开
+                        q_target = rewards + (1 - dones) * self.discount_factor * targetNetworkFutureActionval
+                    q_eval = self.policy_network(states)
+                    q_eval = q_eval.gather(1, actions.unsqueeze(1)).squeeze()#拿到原动作对应的q_eval
+                    # Huber
+                    loss = F.smooth_l1_loss(q_eval, q_target)
+                    # 常规操作
+                    self.optimiser.zero_grad()
+                    loss.backward()
+                    self.optimiser.step()
+                    # 清空，减少爆内存可能性
+                    del states
+                    del next_states
+                    lossList.append(loss.item())
                     
                 # 如果又经过了指定的时间
                 if self.global_counting > self.learning_starts and self.global_counting % self.target_update_rate == 0:
                     #Q_target更新
-                    self.target_network.set_weights(self.policy_network.get_weights())
+                    self.update_target_network()
                 
                 # 计数器更新
                 self.global_counting += 1
@@ -263,8 +227,21 @@ class DQNplayer:
             # 记录在文件中
             rewardFileWriter.write("{}\n".format(currentEpisodeReward))
             rewardFileWriter.flush()
-            logging.warning("episode {} 's reward {}".format(episode_num_counter,currentEpisodeReward))
-            logging.warning("reward distribute: max reward {}/ minreward {}".format(max(rewardList),min(rewardList)))
+            logging.warning("episode {}/frame {} 's reward {}".format(episode_num_counter,self.global_counting,currentEpisodeReward))
+            #logging.warning("reward distribute: max reward {}/ minreward {}".format(max(rewardList),min(rewardList)))
+            if len(lossList) > 0:
+                logging.warning("mean of loss is {}".format(np.mean(lossList)))
+            else:
+                logging.warning("Still not start")
+
+            # 输出平均值
+            if len(episode_total_reward)>0:
+                logging.warning("avg reward of 10 episode {}".format(np.mean(episode_total_reward[-10:])))
+                logging.warning("avg random action times for 1w frame {}:".format(np.mean(self.actionRandomRecorder)))
+                logging.warning("Current Epsilon val : {}".format(self.currentEpsilonVal))
+
+            if episode_num_counter % self.hyper_param["print-freq"] == 0:
+                self.savemodel()
 
         # 训练完毕
         rewardFileWriter.close()
@@ -272,7 +249,7 @@ class DQNplayer:
         plt.plot(episode_total_reward)
         plt.show()
 
-    def epsilon_greedy(self,actionVal):
+    def epsilon_greedy(self,state):
         '''
             接受神经网络的输出值，返回期望进行的动作。
             函数会产生一个随机数，如果随机数的值小于epsilon，则返回随机动作；
@@ -290,28 +267,26 @@ class DQNplayer:
         fraction = min(1.0, float(self.global_counting) / eps_timesteps)
         currentEpsilonVal = self.eps_start + fraction * \
             (self.eps_end - self.eps_start)
+        self.currentEpsilonVal = currentEpsilonVal
         randomNum = np.random.rand() # 获取一个0~1的随机数
         if randomNum < currentEpsilonVal:
             # 返回随机动作
-            return np.random.randint(len(actionVal))
+            self.actionRandomRecorder.append(1)
+            return self.env.action_space.sample()
         else:
             # 返回当前最大动作
-            return np.argmax(actionVal)
-
-    def preprocessing(self,observation):
-        '''
-        预处理函数，负责对数据进行预处理。
-        分为两种情况，如果是RGB数据，则将其映射到[0,1]上，即除以255
-        如果是RAM数据，则直接返回
-        '''
-        #if self.networkName == "conv2d" or self.networkName == "duel":
-        #    observation = observation[34:-16, :, :] # 裁剪掉上下的无用部分
-        #    resized_frame = cv2.resize(observation, (84, 84), interpolation = cv2.INTER_AREA)
-        #    frame_gray = rgb2gray(resized_frame)
-        #    return frame_gray
-        #else:
-        return np.moveaxis(np.array(observation),0,2)/255.
+            self.actionRandomRecorder.append(0)
+            device = self.device
+            state = np.array(state)/255.
+            state = torch.from_numpy(state).float().unsqueeze(0).to(device)
+            with torch.no_grad():
+                q_values = self.policy_network(state)
+                _, action = q_values.max(1)
+                return action.item()
+    
+    def update_target_network(self):
+        self.target_network.load_state_dict(self.policy_network.state_dict())
 
     def savemodel(self,name="Q_main"):
-        self.policy_network.save(name)
+        torch.save(self.policy_network.state_dict(), f'checkpoint.pth')
 

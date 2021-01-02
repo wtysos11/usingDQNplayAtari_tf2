@@ -1,10 +1,7 @@
 import logger
 import DQN
-import tensorflow as tf
 import logging
 def main():
-    config = tf.compat.v1.ConfigProto(gpu_options=tf.compat.v1.GPUOptions(allow_growth=True))
-    sess = tf.compat.v1.Session(config=config)
     logger.console_out("output.txt")
 
     logging.fatal("Next will output debug test/ info test/ warning test.")
@@ -23,6 +20,7 @@ def main():
         "batch-size": 32,  # number of transitions to optimize at the same time
         "learning-starts": 10000,  # number of steps before learning starts
         "learning-freq": 1,  # number of iterations between every optimization step
+        "print-freq": 10,
         "use-double-dqn": True,  # use double deep Q-learning
         "target-update-freq": 1000,  # number of iterations between every target network update
         "eps-start": 1,  # e-greedy start threshold
