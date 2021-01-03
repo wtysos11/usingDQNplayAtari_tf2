@@ -12,7 +12,7 @@ def main():
 
     hyper_param = {
         "seed": 42,  # which seed to use
-        "env": "BreakoutNoFrameskip-v4",  # name of the game
+        "env": "PongNoFrameskip-v4",  # name of the game
         "replay-buffer-size": int(5e3),  # replay buffer size
         "learning-rate": 1e-4,  # learning rate for Adam optimizer
         "discount-factor": 0.99,  # discount factor
@@ -31,8 +31,8 @@ def main():
         "prioritized_replay_alpha": 0.6,
         "prioritized_replay_beta0": 0.4,
         "prioritized_replay_eps": 1e-6,
-        "use_multi_step": True,
-        "use_noisy_network": True
+        "use_multi_step": False,
+        "use_noisy_network": False
     }
 
     player = DQN.DQNplayer(networkName="conv2d",hyper_param = hyper_param) #声明player，使用Conv2D解析RGB
