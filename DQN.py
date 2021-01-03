@@ -295,8 +295,7 @@ class DQNplayer:
                                            final_p=1.0)
         # 声明规划器
         episode_total_reward = [] # 用于存放每一轮的奖励，并绘制最终曲线
-        thousand_frame_reward = []
-        thousand_frame_reward_recorder = deque(maxlen=1000)
+        episode_mean_reward = []
         # exploration
          # 目的是填满缓冲区。我想了一下还是不用多步了，因为计算出来的肯定是错的，所以用不用是没区别的。
          # 最好的方式应该是保留下缓冲区的数据，供之后的训练使用。
@@ -335,7 +334,6 @@ class DQNplayer:
                 gameDone = done
                 currentEpisodeReward += reward # 更新episode奖励
                 rewardList.append(reward)
-                thousand_frame_reward_recorder.append(reward)
 
                 self.memoryBuffer.add(observation,action,reward,next_observation,float(done))
                 if self.hyper_param["use_multi_step"]:
@@ -383,18 +381,15 @@ class DQNplayer:
                     #logging.warning("mean loss:{}",np.mean(lossList))
                     if self.global_counting % self.hyper_param["backup_record_step"] == 0:
                         self.savemodel(str(self.global_counting))
-                if self.global_counting % 1000 == 0:
-                    if len(thousand_frame_reward_recorder) == 0:
-                        thousand_frame_reward.append(0)
-                    else:
-                        thousand_frame_reward.append(np.mean(thousand_frame_reward_recorder))
-                    # 记录下来
-                    np.savetxt('rewards_per_thousandFrame.csv', thousand_frame_reward,
-                       delimiter=',', fmt='%1.3f')
 
             
             episode_num_counter += 1
             episode_total_reward.append(currentEpisodeReward)
+            episode_mean_reward.append(np.mean(episode_total_reward[-100:]))
+            np.savetxt('rewards_per_episode.csv', episode_mean_reward,
+                       delimiter=',', fmt='%1.3f')
+            np.savetxt('episodeReward.csv', episode_total_reward,
+                                   delimiter=',', fmt='%1.3f')
             # 记录在文件中
             rewardFileWriter.write("{}\n".format(currentEpisodeReward))
             rewardFileWriter.flush()
